@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+whmcs-proxy-credentials.txt
+/etc/gost/
+*.log

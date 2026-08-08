@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# whmcsproxy — management console for the WHMCS SSL proxy stack.
+#   whmcsproxy            → interactive menu (x-ui style)
+#   whmcsproxy status     → passthrough to gostctl (status/useradd/…)
+#   whmcsproxy benchmark  → tunnel performance report
+#   whmcsproxy migrate-proxy-domain <sub> [email] [mode]
+#   whmcsproxy migrate-dashboard-domain <sub> [email] [mode]
+set -uo pipefail
+
+WP_INSTALL_DIR="${WP_INSTALL_DIR:-/opt/whmcs-proxy}"
+export GOST_STATE="${GOST_STATE:-/etc/gost/state.json}"
+# shellcheck source=/dev/null
+source "$WP_INSTALL_DIR/common.sh" 2>/dev/null || {
+  echo "whmcsproxy: cannot load $WP_INSTALL_DIR/common.sh (is the stack installed?)" >&2; exit 1; }
+
+[ -f "$GOST_STATE" ] || { wp_red "not installed: $GOST_STATE missing. Run setup.sh / install.sh first."; exit 1; }
+
+pause(){ read -rp $'\n'"Press Enter to continue… " _; }
+ask(){ local p="$1" d="${2:-}" v; read -rp "$p${d:+ [$d]}: " v; echo "${v:-$d}"; }
+confirm(){ local a; read -rp "$1 (y/N): " a; [[ "$a" =~ ^[Yy]$ ]]; }
+
+# -------------------------------------------------- non-interactive subcommands
+if [ $# -gt 0 ]; then
+  case "$1" in
+    migrate-proxy-domain)     shift; wp_migrate_proxy_domain "$@"; exit $? ;;
+    migrate-dashboard-domain) shift; wp_migrate_dashboard_domain "$@"; exit $? ;;
+    tune)        wp_apply_tuning; exit $? ;;
+    benchmark|bench) wp_tunnel_benchmark; exit $? ;;
+    health)      wp_tunnel_health; exit $? ;;
+    menu)        : ;;   # fall through to interactive
+    *)           wp_ctl "$@"; exit $? ;;   # passthrough to gostctl
+  esac
+fi
+
+# -------------------------------------------------- menu actions
+act_status(){ wp_ctl status; }
+
+act_users(){
+  while true; do
+    echo; wp_ctl list-users
+    echo; echo " 1) add user   2) delete user   3) reset password   4) enable/disable   0) back"
+    case "$(ask 'choice')" in
+      1) local u; u="$(ask 'new username')"; [ -n "$u" ] && wp_ctl useradd "$u" --apply ;;
+      2) local u; u="$(ask 'username to delete')"; [ -n "$u" ] && wp_ctl userdel "$u" --apply ;;
+      3) local u; u="$(ask 'username')"; [ -n "$u" ] && wp_ctl passwd "$u" --apply ;;
+      4) local u; u="$(ask 'username to toggle')"
+         [ -n "$u" ] && python3 "$WP_INSTALL_DIR/gostctl.py" show-config >/dev/null 2>&1
+         # toggle via a tiny python edit then apply
+         [ -n "$u" ] && python3 - "$GOST_STATE" "$u" <<'PY' && wp_ctl apply
+import json,sys
+p,u=sys.argv[1],sys.argv[2]; s=json.load(open(p))
+for x in s['users']:
+    if x['username']==u: x['enabled']=not x.get('enabled',True)
+json.dump(s,open(p,'w'),indent=2)
+PY
+         ;;
+      0|"") break ;;
+    esac
+  done
+}
+
+act_ports(){
+  echo "current ports:"; wp_jget "state['ports']" | tr ',' '\n'
+  local name val
+  name="$(ask 'port name (https/socks/http/tunnel/dashboard)')"
+  [ -z "$name" ] && return
+  val="$(ask "new value for $name")"
+  [ -n "$val" ] && wp_ctl set-port "$name" "$val" --apply
+}
+
+act_change_proxy_domain(){
+  echo "This issues a NEW Let's Encrypt certificate and switches the proxy to it."
+  wp_yel "First create a DNS A record for the new subdomain pointing to THIS server."
+  local nd email mode
+  nd="$(ask 'new proxy subdomain (e.g. proxy.yourdomain.com)')"
+  [ -z "$nd" ] && return
+  email="$(ask 'email for Let'\''s Encrypt (optional)')"
+  mode="$(ask 'cert mode: standalone / dns-cloudflare / dns-arvan' 'standalone')"
+  local extra=""
+  case "$mode" in
+    dns-cloudflare) extra="$(ask 'Cloudflare API token')" ;;
+    dns-arvan) wp_yel 'set the A record to DNS-only (cloud OFF) in ArvanCloud'; extra="$(ask 'ArvanCloud API key')" ;;
+  esac
+  confirm "Issue cert for $nd and switch the proxy?" || return
+  wp_migrate_proxy_domain "$nd" "$email" "$mode" "$extra"
+}
+
+act_change_dashboard_domain(){
+  echo "Give the dashboard its own subdomain + certificate."
+  wp_yel "First create a DNS A record for the new subdomain pointing to THIS server."
+  local nd email mode
+  nd="$(ask 'new dashboard subdomain')"
+  [ -z "$nd" ] && return
+  email="$(ask 'email for Let'\''s Encrypt (optional)')"
+  mode="$(ask 'cert mode: standalone / dns-cloudflare / dns-arvan' 'standalone')"
+  local extra=""
+  case "$mode" in
+    dns-cloudflare) extra="$(ask 'Cloudflare API token')" ;;
+    dns-arvan) wp_yel 'set the A record to DNS-only (cloud OFF) in ArvanCloud'; extra="$(ask 'ArvanCloud API key')" ;;
+  esac
+  confirm "Issue cert for $nd and move the dashboard?" || return
+  wp_migrate_dashboard_domain "$nd" "$email" "$mode" "$extra"
+}
+
+act_tunnel(){
+  while true; do
+    echo
+    echo "── Tunnel ──"; wp_ctl status | grep -E 'tunnel:|domain:' || true
+    echo " 1) show settings   2) set exit host/port/creds   3) transport & performance"
+    echo " 4) run benchmark    5) health check              0) back"
+    case "$(ask 'choice')" in
+      1) wp_jget "state['exit']"; echo; wp_jget "state['tunnel_opts']" ;;
+      2) local h p u pw
+         h="$(ask 'exit host (FQDN)')"; p="$(ask 'exit port' '8443')"
+         u="$(ask 'tunnel user')"; pw="$(ask 'tunnel pass')"
+         wp_ctl set-exit --host "$h" --port "$p" --user "$u" --password "$pw" --apply ;;
+      3) local tr mux ka
+         tr="$(ask 'transport: tls / wss / mtls' 'tls')"
+         mux="$(ask 'mux on/off' 'on')"
+         ka="$(ask 'keepalive (e.g. 15s)' '15s')"
+         wp_ctl set-transport --transport "$tr" --mux "$mux" --keepalive "$ka" --apply ;;
+      4) wp_tunnel_benchmark ;;
+      5) wp_tunnel_health ;;
+      0|"") break ;;
+    esac
+  done
+}
+
+act_logs(){
+  echo " 1) recent requests (table)   2) live tail   0) back"
+  case "$(ask 'choice')" in
+    1) wp_ctl logtail --limit 40; pause ;;
+    2) local f; f="$(wp_jget "state['log']['file']")"
+       echo "tailing $f — Ctrl-C to stop"; tail -n 20 -f "$f" 2>/dev/null || echo "no log file yet" ;;
+    *) : ;;
+  esac
+}
+
+act_ssl(){
+  echo " 1) show certificate info   2) renew now   3) auto-renew status   0) back"
+  case "$(ask 'choice')" in
+    1) local d cf; d="$(wp_jget "state['domain']")"
+       cf="/etc/letsencrypt/live/$d/fullchain.pem"
+       [ -f "$cf" ] && openssl x509 -in "$cf" -noout -subject -issuer -dates || echo "no cert at $cf"
+       pause ;;
+    2) certbot renew --force-renewal && wp_restart_gost && wp_restart_dashboard && wp_grn "renewed"; pause ;;
+    3) systemctl status certbot.timer --no-pager 2>/dev/null | head -6 || systemctl list-timers 'certbot*' --no-pager; pause ;;
+    *) : ;;
+  esac
+}
+
+act_services(){
+  echo "gost:      $(systemctl is-active gost 2>/dev/null)"
+  echo "dashboard: $(systemctl is-active whmcs-proxy-dashboard 2>/dev/null)"
+  echo " 1) restart all   2) stop all   3) start all   4) journal (gost)   0) back"
+  case "$(ask 'choice')" in
+    1) wp_restart_gost; wp_restart_dashboard; wp_grn "restarted" ;;
+    2) systemctl stop gost whmcs-proxy-dashboard 2>/dev/null; wp_yel "stopped" ;;
+    3) systemctl start gost whmcs-proxy-dashboard 2>/dev/null; wp_grn "started" ;;
+    4) journalctl -u gost -n 40 --no-pager; pause ;;
+    *) : ;;
+  esac
+}
+
+act_creds(){ [ -f /root/whmcs-proxy-credentials.txt ] && cat /root/whmcs-proxy-credentials.txt || wp_yel "no saved credentials file"; pause; }
+
+act_uninstall(){
+  confirm "Really uninstall the whole stack?" || return
+  if [ -f "$WP_INSTALL_DIR/uninstall.sh" ]; then bash "$WP_INSTALL_DIR/uninstall.sh"; else
+    systemctl disable --now gost whmcs-proxy-dashboard 2>/dev/null
+    rm -f /etc/systemd/system/gost.service /etc/systemd/system/whmcs-proxy-dashboard.service
+    systemctl daemon-reload; rm -rf "$WP_INSTALL_DIR" /etc/gost /usr/local/bin/whmcsproxy /usr/local/bin/whmcs-proxy /usr/local/bin/gost
+    wp_grn "removed"
+  fi
+  exit 0
+}
+
+# -------------------------------------------------- main loop
+while true; do
+  clear 2>/dev/null || true
+  local_role="$(wp_jget "state['role']")"; local_domain="$(wp_jget "state['domain']")"
+  gost_st="$(systemctl is-active gost 2>/dev/null || echo n/a)"
+  echo "╔══════════════════════════════════════════════════════════╗"
+  printf "║  WHMCS Proxy  ·  %-8s ·  %-26s ║\n" "$local_role" "$local_domain"
+  printf "║  gost: %-10s                                        ║\n" "$gost_st"
+  echo "╠══════════════════════════════════════════════════════════╣"
+  cat <<'MENU'
+║   1) Status & endpoints                                  ║
+║   2) Proxy users (add / delete / password / on-off)      ║
+║   3) Ports                                               ║
+║   4) Change proxy SSL subdomain  (auto re-issue + apply) ║
+║   5) Change dashboard subdomain / URL                    ║
+║   6) Tunnel  (exit / transport / benchmark / health)     ║
+║   7) Network performance tuning (BBR + buffers)          ║
+║   8) Request logs  (source IP → destination)             ║
+║   9) SSL  (info / renew now / auto-renew status)         ║
+║  10) Services  (start / stop / restart / journal)        ║
+║  11) Show saved credentials                              ║
+║  12) Uninstall                                           ║
+║   0) Exit                                                ║
+╚══════════════════════════════════════════════════════════╝
+MENU
+  case "$(ask 'select')" in
+    1) act_status; pause ;;
+    2) act_users ;;
+    3) act_ports; pause ;;
+    4) act_change_proxy_domain; pause ;;
+    5) act_change_dashboard_domain; pause ;;
+    6) act_tunnel ;;
+    7) wp_apply_tuning; wp_restart_gost; pause ;;
+    8) act_logs ;;
+    9) act_ssl ;;
+    10) act_services; pause ;;
+    11) act_creds ;;
+    12) act_uninstall ;;
+    0|q|"") clear 2>/dev/null || true; exit 0 ;;
+    *) : ;;
+  esac
+done
