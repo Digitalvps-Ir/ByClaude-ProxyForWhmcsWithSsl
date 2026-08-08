@@ -203,6 +203,22 @@ obtain_cert(){
     info "certificate for $d already present; skipping issuance"
     return
   fi
+  # Pre-flight DNS check for HTTP-01 methods: catch the common NXDOMAIN /
+  # wrong-IP mistake with a clear message before certbot's wall of text.
+  if [ "$CERT_MODE" = "standalone" ] || [ "$CERT_MODE" = "webroot" ]; then
+    local rip; rip="$(getent hosts "$d" 2>/dev/null | awk '{print $1; exit}')"
+    if [ -z "$rip" ]; then
+      c_red "DNS: «$d» resolve نمی‌شود (رکورد A ندارد / NXDOMAIN)."
+      c_red "یک رکورد A برای «$d» بسازید که به IP همین سرور اشاره کند (ابر/CDN خاموش)،"
+      c_red "یا چون دامنه‌تان روی ArvanCloud است از این استفاده کنید:  --cert-mode dns-arvan --arvan-token <API_KEY>"
+      die "DNS record for '$d' not found. Create an A record to THIS server (CDN off), or use --cert-mode dns-arvan/dns-cloudflare."
+    fi
+    local myips; myips=" $(hostname -I 2>/dev/null) $(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null) "
+    case "$myips" in
+      *" $rip "*) : ;;
+      *) c_yel "warning / هشدار: «$d» به $rip اشاره می‌کند که شاید IP همین سرور نباشد — اگر standalone شکست خورد، رکورد A را اصلاح کنید یا از dns-arvan استفاده کنید." ;;
+    esac
+  fi
   local ca_args="--non-interactive --agree-tos"
   if [ -n "$EMAIL" ]; then ca_args="$ca_args -m $EMAIL"; else ca_args="$ca_args --register-unsafely-without-email"; fi
   case "$CERT_MODE" in
