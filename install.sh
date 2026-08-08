@@ -2,21 +2,27 @@
 #
 # install.sh — online bootstrap for the WHMCS SSL proxy stack.
 #
-# One-liner (run on each server, as root):
+# PUBLIC repo — one-liner (run on each server, as root):
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl/claude/whmcs-proxy-ssl-setup-obed47/install.sh)
 #
-# It installs git, clones the project, and launches the installer. With no
-# arguments it asks a few questions; you can also pass setup.sh flags straight
-# through for a fully non-interactive run, e.g.:
+# PRIVATE repo — clone with a read-only token, then run locally (no re-clone):
 #
-#   bash <(curl -fsSL .../install.sh) --role exit --domain tunnel.example.com --email you@x.com
+#   git clone -b claude/whmcs-proxy-ssl-setup-obed47 \
+#     https://<TOKEN>@github.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl.git
+#   cd ByClaude-ProxyForWhmcsWithSsl && sudo ./install.sh
 #
+# You can also pass setup.sh flags straight through for a non-interactive run:
+#   sudo ./install.sh --role exit --domain tunnel.example.com --email you@x.com
+#
+# When it does need to fetch, a token can be supplied via WP_TOKEN / GITHUB_TOKEN.
 set -euo pipefail
 
 REPO_URL="${WP_REPO_URL:-https://github.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl.git}"
 BRANCH="${WP_BRANCH:-claude/whmcs-proxy-ssl-setup-obed47}"
 DEST="${WP_DEST:-/opt/whmcs-proxy-src}"
+TOKEN="${WP_TOKEN:-${GITHUB_TOKEN:-}}"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
 
 grn(){ printf '\033[32m%s\033[0m\n' "$*"; }
 yel(){ printf '\033[33m%s\033[0m\n' "$*"; }
@@ -47,6 +53,13 @@ grn "✓ prerequisites ready"
 
 # ------------------------------------------------------------------ fetch project
 fetch_project(){
+  # build a clone URL, injecting the token for private repos
+  local clone_url="$REPO_URL" slug tar
+  slug="$(echo "$REPO_URL" | sed -E 's#https?://github.com/##; s#\.git$##')"
+  if [ -n "$TOKEN" ]; then
+    clone_url="https://${TOKEN}@github.com/${slug}.git"
+  fi
+
   if [ -d "$DEST/.git" ]; then
     info "Updating existing checkout in $DEST…"
     git -C "$DEST" fetch --depth 1 origin "$BRANCH" && git -C "$DEST" checkout -f "$BRANCH" \
@@ -55,24 +68,39 @@ fetch_project(){
   rm -rf "$DEST"
   local i
   for i in 1 2 3 4; do
-    info "Cloning $REPO_URL ($BRANCH) → $DEST  [try $i]"
-    if git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$DEST"; then return 0; fi
+    info "Cloning $slug ($BRANCH) → $DEST  [try $i]"
+    if git clone --depth 1 --branch "$BRANCH" "$clone_url" "$DEST" 2>/tmp/wp-clone.err; then return 0; fi
+    grep -qiE '403|denied|authentication|not found|could not read' /tmp/wp-clone.err 2>/dev/null && break
     sleep $((i*2)) || true
   done
   # fallback: tarball via codeload (works when git protocol is throttled)
   yel "git clone failed; trying tarball…"
-  local slug tar
-  slug="$(echo "$REPO_URL" | sed -E 's#https?://github.com/##; s#\.git$##')"
   tar="https://codeload.github.com/$slug/tar.gz/refs/heads/$BRANCH"
   mkdir -p "$DEST"
-  curl -fSL "$tar" | tar -xz -C "$DEST" --strip-components=1 \
-    || die "could not fetch the project (git and tarball both failed). Check network/DNS to github.com."
+  local auth=()
+  [ -n "$TOKEN" ] && auth=(-H "Authorization: Bearer $TOKEN")
+  if ! curl -fSL "${auth[@]}" "$tar" | tar -xz -C "$DEST" --strip-components=1; then
+    red "Could not fetch the project."
+    red "If the repository is PRIVATE, raw/clone return 404/403 without credentials."
+    red "  • simplest: make the repo public (it contains no secrets), then re-run the one-liner, OR"
+    red "  • clone with a read-only token and run locally:"
+    red "      git clone -b $BRANCH https://<TOKEN>@github.com/$slug.git"
+    red "      cd $(basename "$slug") && sudo ./install.sh"
+    exit 1
+  fi
 }
-fetch_project
-grn "✓ project fetched"
+
+# If we are already inside a checkout (e.g. cloned manually), use it as-is.
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/setup.sh" ]; then
+  DEST="$SELF_DIR"
+  info "Using local checkout: $DEST"
+else
+  fetch_project
+  grn "✓ project fetched"
+fi
 
 cd "$DEST"
-chmod +x setup.sh whmcsproxy uninstall.sh gostctl.py dashboard.py 2>/dev/null || true
+chmod +x setup.sh whmcsproxy uninstall.sh gostctl.py dashboard.py install.sh 2>/dev/null || true
 
 # ------------------------------------------------------------------ run installer
 if [ $# -gt 0 ]; then

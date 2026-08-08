@@ -49,6 +49,15 @@ Run on **each** server as root — it clones the project and walks you through s
 bash <(curl -fsSL https://raw.githubusercontent.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl/claude/whmcs-proxy-ssl-setup-obed47/install.sh)
 ```
 
+> **Private repo?** `raw.githubusercontent.com` returns **404** for private repositories.
+> Either make the repo public (it stores no secrets), or clone with a read-only token and
+> run it locally (no re-clone needed):
+> ```bash
+> git clone -b claude/whmcs-proxy-ssl-setup-obed47 \
+>   https://<TOKEN>@github.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl.git
+> cd ByClaude-ProxyForWhmcsWithSsl && sudo ./install.sh
+> ```
+
 Do the **foreign (EXIT)** server first, then the **Iran (ENTRY)** server with the tunnel
 credentials the exit step prints.
 

@@ -70,12 +70,17 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl/claude/whmcs-proxy-ssl-setup-obed47/install.sh)
 ```
 
-اگر `raw.githubusercontent.com` در دسترس نبود، به‌جایش کلون کنید:
-
-```bash
-git clone -b claude/whmcs-proxy-ssl-setup-obed47 https://github.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl.git
-cd ByClaude-ProxyForWhmcsWithSsl && sudo ./install.sh
-```
+> اگر خطای **404** گرفتید، یعنی ریپو **private** است (raw برای ریپوی خصوصی ۴۰۴ می‌دهد).
+> دو راه دارید:
+> - **ساده‌ترین:** ریپو را public کنید (هیچ رمز/سکرتی داخلش نیست) و همان یک‌خط را دوباره بزنید؛ یا
+> - با یک **توکن read-only** کلون کنید و محلی اجرا کنید (دیگر کلون مجدد نمی‌کند):
+> ```bash
+> git clone -b claude/whmcs-proxy-ssl-setup-obed47 \
+>   https://<TOKEN>@github.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl.git
+> cd ByClaude-ProxyForWhmcsWithSsl && sudo ./install.sh
+> ```
+> ساخت توکن: GitHub → Settings → Developer settings → **Fine-grained tokens** → دسترسی
+> فقط به همین ریپو با مجوز **Contents: Read-only**.
 
 نصب‌کننده اول روی **سرور خارج (EXIT)** و بعد **سرور ایران (ENTRY)** اجرا می‌شود. اگر ترجیح
 می‌دهید دستی و با فلگ‌ها اجرا کنید، ادامه را ببینید.
