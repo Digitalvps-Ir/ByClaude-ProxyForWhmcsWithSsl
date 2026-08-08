@@ -59,7 +59,8 @@ c_red(){ printf '\033[31m%s\033[0m\n' "$*" >&2; }
 info(){ printf '\033[36m›\033[0m %s\n' "$*"; }
 die(){ c_red "ERROR: $*"; exit 1; }
 have(){ command -v "$1" >/dev/null 2>&1; }
-rand(){ tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-18}"; }
+# finite-input random string — avoids SIGPIPE under `set -o pipefail`
+rand(){ local n="${1:-18}" s; s="$(head -c "$((n*10+32))" /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"; printf '%s' "${s:0:n}"; }
 
 usage(){ sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
@@ -244,7 +245,7 @@ if [ "$ROLE" = "entry" ]; then
               --tunnel-user "$TUNNEL_USER" --tunnel-pass "$TUNNEL_PASS")
   [ "$TUNNEL_INSECURE" = "1" ] && INIT_ARGS+=(--tunnel-insecure)
 fi
-python3 "$INSTALL_DIR/gostctl.py" "${INIT_ARGS[@]}"
+python3 "$INSTALL_DIR/gostctl.py" init "${INIT_ARGS[@]}"
 
 # users / shared secret
 if [ "$ROLE" = "exit" ]; then

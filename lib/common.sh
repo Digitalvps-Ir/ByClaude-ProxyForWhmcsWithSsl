@@ -12,7 +12,8 @@ wp_red(){ printf '\033[31m%s\033[0m\n' "$*" >&2; }
 wp_info(){ printf '\033[36m›\033[0m %s\n' "$*"; }
 wp_die(){ wp_red "ERROR: $*"; return 1; }
 wp_have(){ command -v "$1" >/dev/null 2>&1; }
-wp_rand(){ tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-18}"; }
+# finite-input random string — avoids SIGPIPE under `set -o pipefail`
+wp_rand(){ local n="${1:-18}" s; s="$(head -c "$((n*10+32))" /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"; printf '%s' "${s:0:n}"; }
 
 wp_ctl(){ python3 "$WP_INSTALL_DIR/gostctl.py" "$@"; }
 
