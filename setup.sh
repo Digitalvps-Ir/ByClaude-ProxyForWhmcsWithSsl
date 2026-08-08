@@ -140,7 +140,7 @@ esac
 info "Updating apt and installing dependencies…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-PKGS="curl ca-certificates openssl tar python3"
+PKGS="curl ca-certificates openssl tar python3 iputils-ping"
 [ "$CERT_MODE" = "existing" ] || PKGS="$PKGS certbot"
 [ "$CERT_MODE" = "dns-cloudflare" ] && PKGS="$PKGS python3-certbot-dns-cloudflare"
 apt-get install -y -qq $PKGS >/dev/null

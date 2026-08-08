@@ -150,63 +150,73 @@ EOF
   exit 0
 fi
 
+# NOTE: every printed line starts with an ASCII character so the terminal keeps
+# a left-to-right base direction — this stops Persian/English from scrambling
+# over SSH. Prompts are English; Persian help is on its own '#'-prefixed lines.
 echo
-cat <<'B'
-─────────────────────────────────────────────────────────────────
-  این سرور کدام است؟   /   Which server is this?
-
-    1) سرور ایران  (پنل مدیریت + پروکسی)   ← اول این را نصب کنید
-       ENTRY — Iran  (dashboard + proxy)   ← install FIRST
-
-    2) سرور خارج  (فقط تانل، بدون دامنه)
-       EXIT  — Foreign (tunnel only, no domain)
-─────────────────────────────────────────────────────────────────
-B
-RC="$(ask 'شماره / number' '1')"
+echo "=================================================================="
+echo "  WHMCS SSL Proxy — installer"
+echo "  #  نصب‌کننده‌ی پروکسی SSL برای WHMCS"
+echo "=================================================================="
+echo "  Which server is this?"
+echo "  #  این سرور کدام است؟"
+echo
+echo "   1) Iran server   — dashboard + proxy   (install this FIRST)"
+echo "   #  سرور ایران    — پنل و پروکسی         (اول این را نصب کنید)"
+echo
+echo "   2) Foreign server — tunnel only (no domain, no dashboard)"
+echo "   #  سرور خارج      — فقط تانل (بدون دامنه و داشبورد)"
+echo "=================================================================="
+RC="$(ask 'choose 1 or 2' '1')"
 
 # ============================ EXIT (foreign) =====================
 if [ "$RC" = "2" ]; then
   echo
-  yel "سرور خارج فقط تانل است: بدون دامنه، بدون گواهی معتبر، بدون داشبورد."
-  echo "Foreign node = tunnel only. Best: paste the ready command that the Iran"
-  echo "install printed. Otherwise enter the SAME tunnel user/pass you used on Iran."
-  TP="$(ask 'پورت تانل / tunnel port' '8443')"
-  TU="$(ask 'یوزر تانل / tunnel user' 'tunnel')"
-  TPW="$(ask 'پسورد تانل / tunnel pass (خالی=ساخت خودکار)')"
-  [ -n "$TPW" ] || { TPW="$(gen 24)"; yel "پسورد ساخته‌شده / generated: $TPW  (باید روی ایران هم همین باشد)"; }
+  echo "  Foreign node = tunnel only. Best: paste the ready command that the"
+  echo "  Iran install printed, or enter the SAME tunnel user/pass used on Iran."
+  echo "  #  سرور خارج فقط تانل است. بهتر است همان دستوری که سرور ایران چاپ کرد را بزنید،"
+  echo "  #  یا همان یوزر/پسورد تانلی که روی ایران استفاده کردید را وارد کنید."
+  TP="$(ask 'tunnel port' '8443')"
+  TU="$(ask 'tunnel user' 'tunnel')"
+  TPW="$(ask 'tunnel pass (blank = auto-generate)')"
+  [ -n "$TPW" ] || { TPW="$(gen 24)"; echo "  generated tunnel pass: $TPW"; echo "  #  این پسورد باید روی ایران هم همین باشد."; }
   echo; info "Running foreign tunnel setup…"
   exec ./setup.sh --role exit --self-signed --tunnel-port "$TP" --tunnel-user "$TU" --tunnel-pass "$TPW"
 fi
 
 # ============================ ENTRY (Iran) =======================
 echo
-grn "سرور ایران — پنل مدیریت و پروکسیِ WHMCS اینجا نصب می‌شود."
-echo   "Iran node — the dashboard and the SOCKS/HTTPS proxy live here."
+echo "  Iran node — the dashboard and the SOCKS/HTTPS proxy are installed here."
+echo "  #  سرور ایران — پنل مدیریت و پروکسی اینجا نصب می‌شود."
 echo
-echo "▸ ساب‌دامینِ پروکسی (همان که در WHMCS وارد می‌کنید)."
-echo "  یک رکورد A بسازید که به IP همین سرور ایران اشاره کند."
-echo "  مهم: در WHMCS باید همین «نام» را بگذارید، نه IP — چون گواهی SSL روی نام صادر"
-echo "  می‌شود و اگر IP بگذارید خطای cURL 51 می‌گیرید."
-echo "  (Proxy subdomain used in WHMCS; A record must point to THIS server.)"
-DOMAIN="$(ask 'ساب‌دامین / subdomain (e.g. proxy.digitalvps.ir)')"
-[ -n "$DOMAIN" ] || die "subdomain required / ساب‌دامین لازم است"
+echo "  [1/4] Proxy subdomain — you enter THIS in WHMCS (never the IP)."
+echo "  #  ساب‌دامین پروکسی — همین را در WHMCS وارد می‌کنید، نه IP."
+echo "  #  رکورد A آن باید به IP همین سرور ایران اشاره کند."
+echo "  #  اگر IP بگذارید خطای cURL 51 می‌گیرید (گواهی روی نام صادر می‌شود)."
+DOMAIN="$(ask 'subdomain (e.g. proxy.yourdomain.com)')"
+[ -n "$DOMAIN" ] || die "subdomain required"
 
 echo
-echo "▸ IP سرور خارج (تانل به آن وصل می‌شود)."
-echo "  The foreign server's public IP (the tunnel connects there)."
-EXIP="$(ask 'IP سرور خارج / foreign IP')"
-[ -n "$EXIP" ] || die "foreign IP required / IP خارج لازم است"
-TP="$(ask 'پورت تانل / tunnel port' '8443')"
+echo "  [2/4] Foreign server public IP (the tunnel connects there)."
+echo "  #  IP سرور خارج که تانل به آن وصل می‌شود."
+EXIP="$(ask 'foreign IP')"
+[ -n "$EXIP" ] || die "foreign IP required"
+TP="$(ask 'tunnel port' '8443')"
 
 echo
-echo "▸ ایمیل برای Let's Encrypt (اختیاری) / email (optional)."
+echo "  [3/4] Email for Let's Encrypt (optional, press Enter to skip)."
+echo "  #  ایمیل برای گواهی Let's Encrypt (اختیاری)."
 EMAIL="$(ask 'email')"
 
 echo
-echo "▸ روش گواهی / certificate method:"
-echo "   standalone      : ساده — پورت ۸۰ باز و CDN خاموش  (simple; needs :80, CDN off)"
-echo "   dns-cloudflare  : دامنه روی Cloudflare (با CDN هم کار می‌کند)"
-echo "   dns-arvan       : دامنه روی ArvanCloud (با CDN هم کار می‌کند)"
+echo "  [4/4] Certificate method:"
+echo "  #  روش صدور گواهی:"
+echo "     standalone      - simple; needs port 80 open and the CDN OFF"
+echo "     #  ساده — پورت ۸۰ باز و ابر/CDN خاموش"
+echo "     dns-cloudflare  - domain on Cloudflare (works with the CDN ON)"
+echo "     #  دامنه روی Cloudflare (با CDN روشن هم کار می‌کند)"
+echo "     dns-arvan       - domain on ArvanCloud (works with the CDN ON)"
+echo "     #  دامنه روی ArvanCloud (با CDN روشن هم کار می‌کند)"
 CM="$(ask 'cert mode' 'standalone')"
 
 # the Iran side mints the shared tunnel secret
@@ -218,29 +228,33 @@ ARGS=(--role entry --domain "$DOMAIN" --exit-host "$EXIP" --exit-port "$TP"
 if [ "$CM" = "dns-cloudflare" ]; then
   ARGS+=(--cf-token "$(ask 'Cloudflare API token (Zone:DNS:Edit)')")
 elif [ "$CM" = "dns-arvan" ]; then
-  yel "رکورد A را در ArvanCloud روی DNS-only (ابر خاموش) بگذارید."
+  echo "  #  رکورد A را در ArvanCloud روی DNS-only (ابر خاموش) بگذارید."
   ARGS+=(--arvan-token "$(ask 'ArvanCloud API key')")
 fi
 
-echo; info "Running Iran setup… / نصب سرور ایران…"
+echo; info "Running Iran setup…"
 ./setup.sh "${ARGS[@]}"
 rc=$?
-[ "$rc" -eq 0 ] || { red "نصب ایران کامل نشد (کد $rc). خروجی بالا را بفرست."; exit "$rc"; }
+if [ "$rc" -ne 0 ]; then
+  echo
+  red "Iran install did not finish (exit code $rc)."
+  echo "  #  نصب سرور ایران کامل نشد. متن بالا را برای بررسی بفرست."
+  exit "$rc"
+fi
 
 # hand the operator the exact command for the foreign server
 echo
-grn "═══════════════════════════════════════════════════════════════════"
-grn "  گام بعد — این دستور را روی سرور خارج ($EXIP) اجرا کنید:"
-grn "  NEXT — run this on the FOREIGN server ($EXIP):"
-grn "═══════════════════════════════════════════════════════════════════"
+grn "=================================================================="
+grn "  NEXT: run this on the FOREIGN server ($EXIP)"
+echo "  #  گام بعد: این دستور را روی سرور خارج ($EXIP) اجرا کنید:"
+grn "=================================================================="
 echo
 echo "bash <(curl -fsSL https://raw.githubusercontent.com/$SLUG/$BRANCH/install.sh) \\"
 echo "     --role exit --self-signed --tunnel-port $TP --tunnel-user $TU --tunnel-pass $TPW"
 echo
-echo "پس از اجرای دستور بالا روی خارج، تانل بالا می‌آید و پروکسی کامل کار می‌کند."
-echo "(After that runs on the foreign box, the tunnel comes up and the proxy works.)"
-echo
-grn "این دستور در فایل زیر هم ذخیره شد:  /root/run-on-foreign-server.txt"
+echo "  After that runs on the foreign box, the tunnel comes up and it all works."
+echo "  #  بعد از اجرای آن روی خارج، تانل بالا می‌آید و پروکسی کامل کار می‌کند."
+echo "  (also saved to /root/run-on-foreign-server.txt)"
 {
   echo "# Run this on the FOREIGN server ($EXIP):"
   echo "bash <(curl -fsSL https://raw.githubusercontent.com/$SLUG/$BRANCH/install.sh) --role exit --self-signed --tunnel-port $TP --tunnel-user $TU --tunnel-pass $TPW"

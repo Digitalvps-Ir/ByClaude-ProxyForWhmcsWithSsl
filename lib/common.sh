@@ -161,7 +161,9 @@ wp_tunnel_benchmark(){
   if [ "$role" != "entry" ]; then
     wp_yel "run this on the ENTRY (Iran) node"; return 0
   fi
-  local proxy="https://$user:$pass@$domain:$https"
+  # credentials via --proxy-user so special characters in the password are safe
+  local proxy="https://$domain:$https"
+  local pu="$user:$pass"
 
   # 1) path quality to the exit (packet loss + jitter via ICMP if allowed)
   if wp_have ping && [ -n "$exit_host" ]; then
@@ -176,7 +178,7 @@ wp_tunnel_benchmark(){
   local tmp; tmp="$(mktemp)"
   local t
   for _ in $(seq 1 20); do
-    t="$(curl -sS -o /dev/null -m 15 -x "$proxy" -w '%{time_total}' "$target" 2>/dev/null || echo '')"
+    t="$(curl -sS -o /dev/null -m 15 -x "$proxy" --proxy-user "$pu" -w '%{time_total}' "$target" 2>/dev/null || echo '')"
     [ -n "$t" ] && echo "$t" >> "$tmp"
   done
   if [ -s "$tmp" ]; then
@@ -210,7 +212,7 @@ wp_tunnel_health(){
   domain="$(wp_jget "state['domain']")"; https="$(wp_jget "state['ports']['https']")"
   user="$(wp_first_user)"; pass="$(wp_first_pass)"
   local code
-  code="$(curl -sS -o /dev/null -m 15 -x "https://$user:$pass@$domain:$https" \
+  code="$(curl -sS -o /dev/null -m 15 -x "https://$domain:$https" --proxy-user "$user:$pass" \
         -w '%{http_code}' https://api.ipify.org 2>/dev/null || echo 000)"
   if [ "$code" = "200" ]; then wp_grn "tunnel OK (proxy reachable, egress works)"; return 0; fi
   wp_red "tunnel DOWN (code=$code) — check: systemctl status gost; journalctl -u gost -n 40"; return 1
