@@ -52,42 +52,64 @@ apt-get install -y -qq git curl ca-certificates >/dev/null
 grn "✓ prerequisites ready"
 
 # ------------------------------------------------------------------ fetch project
-fetch_project(){
-  # build a clone URL, injecting the token for private repos
-  local clone_url="$REPO_URL" slug tar
-  slug="$(echo "$REPO_URL" | sed -E 's#https?://github.com/##; s#\.git$##')"
-  if [ -n "$TOKEN" ]; then
-    clone_url="https://${TOKEN}@github.com/${slug}.git"
-  fi
+SLUG="$(echo "$REPO_URL" | sed -E 's#https?://github.com/##; s#\.git$##')"
 
-  if [ -d "$DEST/.git" ]; then
-    info "Updating existing checkout in $DEST…"
-    git -C "$DEST" fetch --depth 1 origin "$BRANCH" && git -C "$DEST" checkout -f "$BRANCH" \
-      && git -C "$DEST" reset --hard "origin/$BRANCH" && return 0
-  fi
+# Download the project file-by-file from raw.githubusercontent.com. This is the
+# most reliable path from restricted networks (Iran): git-over-HTTPS to
+# github.com is often throttled, while the raw CDN stays reachable.
+fetch_raw(){
+  local base="https://raw.githubusercontent.com/$SLUG/$BRANCH"
+  local hdr=(); [ -n "$TOKEN" ] && hdr=(-H "Authorization: Bearer $TOKEN")
+  local files=(
+    setup.sh install.sh uninstall.sh whmcsproxy gostctl.py dashboard.py
+    lib/common.sh lib/certbot-arvan-hook.sh
+    examples/test-proxy.sh examples/whmcs-proxy-test.php
+    README.md docs/FA.md docs/WHMCS.md docs/TROUBLESHOOTING.md
+  )
+  rm -rf "$DEST"; mkdir -p "$DEST/lib" "$DEST/examples" "$DEST/docs"
+  local f
+  for f in "${files[@]}"; do
+    if ! curl -fsSL --connect-timeout 20 --retry 3 "${hdr[@]}" "$base/$f" -o "$DEST/$f"; then
+      red "failed to download $f from raw"; return 1
+    fi
+  done
+  return 0
+}
+
+fetch_git(){
+  local clone_url="$REPO_URL"
+  [ -n "$TOKEN" ] && clone_url="https://${TOKEN}@github.com/${SLUG}.git"
   rm -rf "$DEST"
   local i
-  for i in 1 2 3 4; do
-    info "Cloning $slug ($BRANCH) → $DEST  [try $i]"
-    if git clone --depth 1 --branch "$BRANCH" "$clone_url" "$DEST" 2>/tmp/wp-clone.err; then return 0; fi
-    grep -qiE '403|denied|authentication|not found|could not read' /tmp/wp-clone.err 2>/dev/null && break
-    sleep $((i*2)) || true
+  for i in 1 2; do
+    info "Cloning $SLUG ($BRANCH) → $DEST  [try $i, 30s timeout]"
+    if timeout 30 git clone --depth 1 --branch "$BRANCH" "$clone_url" "$DEST" 2>/tmp/wp-clone.err; then return 0; fi
+    grep -qiE '403|denied|authentication|not found|could not read' /tmp/wp-clone.err 2>/dev/null && return 1
   done
-  # fallback: tarball via codeload (works when git protocol is throttled)
-  yel "git clone failed; trying tarball…"
-  tar="https://codeload.github.com/$slug/tar.gz/refs/heads/$BRANCH"
-  mkdir -p "$DEST"
-  local auth=()
-  [ -n "$TOKEN" ] && auth=(-H "Authorization: Bearer $TOKEN")
-  if ! curl -fSL "${auth[@]}" "$tar" | tar -xz -C "$DEST" --strip-components=1; then
-    red "Could not fetch the project."
-    red "If the repository is PRIVATE, raw/clone return 404/403 without credentials."
-    red "  • simplest: make the repo public (it contains no secrets), then re-run the one-liner, OR"
-    red "  • clone with a read-only token and run locally:"
-    red "      git clone -b $BRANCH https://<TOKEN>@github.com/$slug.git"
-    red "      cd $(basename "$slug") && sudo ./install.sh"
-    exit 1
+  return 1
+}
+
+fetch_project(){
+  if [ -d "$DEST/.git" ]; then
+    info "Updating existing checkout in $DEST…"
+    if timeout 30 git -C "$DEST" fetch --depth 1 origin "$BRANCH" \
+        && git -C "$DEST" checkout -f "$BRANCH" \
+        && git -C "$DEST" reset --hard "origin/$BRANCH"; then return 0; fi
   fi
+  # Prefer raw on restricted networks; set WP_PREFER_GIT=1 to try git first.
+  if [ "${WP_NO_GIT:-0}" = "1" ]; then
+    info "Downloading project files from raw…"; fetch_raw && return 0
+  elif [ "${WP_PREFER_GIT:-0}" = "1" ]; then
+    fetch_git && return 0
+    yel "git failed/slow; downloading files from raw…"; fetch_raw && return 0
+  else
+    info "Downloading project files from raw (github CDN)…"
+    fetch_raw && return 0
+    yel "raw download failed; trying git clone…"; fetch_git && return 0
+  fi
+  red "Could not fetch the project (raw and git both failed)."
+  red "If the repo is PRIVATE, pass a token:  WP_TOKEN=<token> bash <(curl -fsSL …/install.sh)"
+  exit 1
 }
 
 # If we are already inside a checkout (e.g. cloned manually), use it as-is.
