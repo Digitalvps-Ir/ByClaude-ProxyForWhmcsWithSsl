@@ -195,7 +195,12 @@ def _tunnel_dialer(state):
     t = _transport(state)
     ex = state.get("exit", {})
     opts = state.get("tunnel_opts", {}) or {}
-    tlsblk = {"serverName": ex.get("host", ""), "secure": bool(ex.get("secure", True))}
+    secure = bool(ex.get("secure", True))
+    # Only set SNI/serverName when verifying: an IP in SNI is invalid and a
+    # self-signed exit reached by IP (secure=false) would reject the handshake.
+    tlsblk = {"secure": secure}
+    if secure:
+        tlsblk["serverName"] = ex.get("host", "")
     meta = {}
     if opts.get("keepalive"):
         meta = {"keepAlive": True, "ttl": opts.get("keepalive", "15s")}

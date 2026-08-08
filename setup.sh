@@ -24,6 +24,7 @@ DOMAIN=""
 DASHBOARD_DOMAIN=""             # optional separate subdomain for the dashboard
 EMAIL=""
 CERT_MODE="standalone"          # standalone | webroot | dns-cloudflare | existing
+SELF_SIGNED=0                   # exit role: use a self-signed tunnel cert (no domain/LE)
 APPLY_TUNING=1                  # BBR + socket buffer tuning
 WEBROOT="/var/www/html"
 CF_TOKEN=""                     # for dns-cloudflare (file path or literal token)
@@ -96,6 +97,7 @@ while [ $# -gt 0 ]; do
     --no-firewall) OPEN_FIREWALL=0; shift;;
     --no-dashboard) NO_DASHBOARD=1; shift;;
     --no-tuning) APPLY_TUNING=0; shift;;
+    --self-signed) SELF_SIGNED=1; shift;;
     -h|--help) usage;;
     *) die "unknown option: $1 (use --help)";;
   esac
@@ -103,11 +105,25 @@ done
 
 [ "$(id -u)" = "0" ] || die "run as root (sudo)"
 [ "$ROLE" = "entry" ] || [ "$ROLE" = "exit" ] || die "--role must be 'entry' or 'exit'"
-[ -n "$DOMAIN" ] || die "--domain is required (the FQDN that points to THIS server)"
 have apt-get || die "this installer targets Debian/Ubuntu (apt)"
 
+# The foreign EXIT node is a tunnel endpoint only: no public subdomain, a
+# self-signed cert, and no dashboard. Trigger it with --self-signed or simply
+# by omitting --domain on the exit role.
+SELF_SIGNED_EXIT=0
+if [ "$ROLE" = "exit" ] && { [ "$SELF_SIGNED" = "1" ] || [ -z "$DOMAIN" ]; }; then
+  SELF_SIGNED_EXIT=1
+  NO_DASHBOARD=1
+  DOMAIN="${DOMAIN:-whmcs-tunnel}"
+  CERT_MODE="existing"
+  CERT_FILE="$STATE_DIR/tunnel-selfsigned.crt"
+  KEY_FILE="$STATE_DIR/tunnel-selfsigned.key"
+fi
+
+[ -n "$DOMAIN" ] || die "--domain is required for the entry (Iran) node"
+
 if [ "$ROLE" = "entry" ]; then
-  [ -n "$EXIT_HOST" ] || die "entry role needs --exit-host (the foreign server FQDN)"
+  [ -n "$EXIT_HOST" ] || die "entry role needs --exit-host (the foreign server IP or FQDN)"
   [ -n "$TUNNEL_USER" ] && [ -n "$TUNNEL_PASS" ] || \
     die "entry role needs --tunnel-user/--tunnel-pass (the values printed by the exit install)"
 fi
@@ -225,6 +241,16 @@ obtain_cert(){
   esac
   c_grn "✓ certificate issued for $d"
 }
+if [ "$SELF_SIGNED_EXIT" = "1" ]; then
+  mkdir -p "$STATE_DIR"
+  if [ ! -f "$CERT_FILE" ]; then
+    info "Generating a self-signed tunnel certificate (foreign node needs no domain)…"
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$KEY_FILE" -out "$CERT_FILE" \
+      -days 3650 -subj "/CN=$DOMAIN" >/dev/null 2>&1 || die "openssl failed to create the self-signed cert"
+    chmod 600 "$KEY_FILE"
+  fi
+  c_grn "✓ self-signed tunnel certificate ready"
+fi
 obtain_cert "$DOMAIN"
 if [ "$ROLE" = "entry" ] && [ -n "$DASHBOARD_DOMAIN" ] && [ "$DASHBOARD_DOMAIN" != "$DOMAIN" ]; then
   obtain_cert "$DASHBOARD_DOMAIN"
@@ -368,13 +394,14 @@ CREDFILE="/root/whmcs-proxy-credentials.txt"
   echo "generated: $(date -u) UTC"
   echo
   if [ "$ROLE" = "exit" ]; then
-    echo "TUNNEL endpoint (give these to the ENTRY/Iran install):"
-    echo "  --exit-host  $DOMAIN"
-    echo "  --exit-port  $TUNNEL_PORT"
-    echo "  --tunnel-user $TUNNEL_USER"
-    echo "  --tunnel-pass $TUNNEL_PASS"
+    echo "TUNNEL node (foreign) is up. The Iran server connects to THIS server's"
+    echo "public IP on the tunnel port below:"
+    echo "  tunnel port : $TUNNEL_PORT"
+    echo "  tunnel user : $TUNNEL_USER"
+    echo "  tunnel pass : $TUNNEL_PASS"
   else
-    echo "PROXY endpoints for WHMCS (Iran IP, valid SSL):"
+    echo "PROXY for WHMCS — use the SUBDOMAIN below, NOT the IP"
+    echo "(the SSL certificate is issued for the name, so an IP gives cURL error 51):"
     echo "  HTTPS proxy : https://$DOMAIN:$HTTPS_PORT   (type=HTTPS)"
     echo "  SOCKS5      : socks5h://$DOMAIN:$SOCKS_PORT"
     [ "$HTTP_PORT" != "0" ] && echo "  HTTP proxy  : http://$DOMAIN:$HTTP_PORT"
@@ -383,13 +410,13 @@ CREDFILE="/root/whmcs-proxy-credentials.txt"
     echo "  cURL proxy  : https://$PROXY_USER:$PROXY_PASS@$DOMAIN:$HTTPS_PORT"
   fi
   echo
-  [ "$NO_DASHBOARD" = "0" ] && {
+  if [ "$NO_DASHBOARD" = "0" ]; then
     dash_host="${DASHBOARD_DOMAIN:-$DOMAIN}"
     echo "DASHBOARD: https://$dash_host:$DASH_PORT"
     echo "  admin user: $ADMIN_USER"
     echo "  admin pass: $ADMIN_PASS"
     echo "CONSOLE (SSH menu): run  whmcsproxy"
-  }
+  fi
 } | tee "$CREDFILE"
 chmod 600 "$CREDFILE"
 

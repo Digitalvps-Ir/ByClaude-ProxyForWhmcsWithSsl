@@ -19,6 +19,21 @@ old proxy simply wasn't serving a valid TLS certificate on that port. The fix is
 endpoint that (a) speaks proper TLS and (b) presents a **valid, trusted certificate** — which
 is exactly what the ENTRY node in this project does (Let's Encrypt on an Iran subdomain).
 
+### Two follow‑up errors you may see (and what they mean)
+
+- **`cURL error 51: no alternative certificate subject name matches target host name '109.x.x.x'`**
+  Progress! TLS to the proxy now works, but you pointed WHMCS at the **IP** instead of the
+  **subdomain**. A Let's Encrypt certificate is issued for the *name*, not the IP, so cURL
+  rejects the name mismatch. **Fix: use the subdomain** (e.g. `proxy.digitalvps.ir`) in WHMCS,
+  never the raw IP — the subdomain's A record already points to the Iran server.
+
+- **`cURL error 56: Received HTTP code 503 from proxy after CONNECT`**
+  The Iran proxy is fine and accepted your request, but it could not forward it through the
+  **tunnel to the foreign server** — i.e. the foreign (EXIT) node isn't running or the tunnel
+  is down. Re‑run the foreign install (the tunnel‑only one‑liner) and confirm
+  `systemctl status gost` is active on the foreign box; check `journalctl -u gost -f` on the
+  Iran box for dial errors.
+
 ## Settings to put in WHMCS / the module
 
 | Field         | Value                                   |

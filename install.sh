@@ -130,69 +130,119 @@ if [ $# -gt 0 ]; then
   exec ./setup.sh "$@"
 fi
 
-# no args: interactive if we have a terminal, else show usage
+ask(){ local p="$1" d="${2:-}" v; read -rp "$p${d:+ [$d]}: " v; echo "${v:-$d}"; }
+gen(){ local n="${1:-24}" s; s="$(head -c "$((n*10+32))" /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"; printf '%s' "${s:0:n}"; }
+
+# no terminal (piped) and no flags: print the manual commands and exit
 if [ ! -t 0 ]; then
   cat <<EOF
 
-Project is in: $DEST
-Run the installer with your own subdomain, for example:
+Project is in: $DEST  — run one of:
 
-  # foreign (exit) server:
-  $DEST/setup.sh --role exit  --domain tunnel.YOURDOMAIN --email you@mail.com
+  # 1) Iran server (panel + proxy):
+  sudo $DEST/setup.sh --role entry --domain proxy.YOURDOMAIN --email you@mail.com \\
+       --exit-host <FOREIGN_IP> --tunnel-user tunnel --tunnel-pass <SECRET> --tunnel-insecure
 
-  # Iran (entry) server:
-  $DEST/setup.sh --role entry --domain proxy.YOURDOMAIN  --email you@mail.com \\
-     --exit-host tunnel.YOURDOMAIN --tunnel-user <U> --tunnel-pass <P>
+  # 2) foreign server (tunnel only):
+  sudo $DEST/setup.sh --role exit --self-signed --tunnel-user tunnel --tunnel-pass <SECRET>
 
 EOF
   exit 0
 fi
 
 echo
-ask(){ local p="$1" d="${2:-}" v; read -rp "$p${d:+ [$d]}: " v; echo "${v:-$d}"; }
+cat <<'B'
+─────────────────────────────────────────────────────────────────
+  این سرور کدام است؟   /   Which server is this?
 
-echo "Which node is THIS server?"
-echo "  1) EXIT  — foreign server (abroad), the tunnel endpoint"
-echo "  2) ENTRY — Iran server, the proxy WHMCS connects to"
-ROLE_CHOICE="$(ask 'choose 1 or 2' '2')"
-if [ "$ROLE_CHOICE" = "1" ]; then ROLE="exit"; else ROLE="entry"; fi
+    1) سرور ایران  (پنل مدیریت + پروکسی)   ← اول این را نصب کنید
+       ENTRY — Iran  (dashboard + proxy)   ← install FIRST
 
-DOMAIN="$(ask "Subdomain for THIS server (A record must point here, e.g. ${ROLE}.yourdomain.com)")"
-[ -n "$DOMAIN" ] || die "a subdomain is required"
-EMAIL="$(ask "Email for Let's Encrypt (optional)")"
+    2) سرور خارج  (فقط تانل، بدون دامنه)
+       EXIT  — Foreign (tunnel only, no domain)
+─────────────────────────────────────────────────────────────────
+B
+RC="$(ask 'شماره / number' '1')"
 
-ARGS=(--role "$ROLE" --domain "$DOMAIN")
-[ -n "$EMAIL" ] && ARGS+=(--email "$EMAIL")
-
-echo "How should the SSL certificate be issued?"
-echo "  • standalone     — quick, needs TCP/80 free & DNS pointing here (CDN OFF)"
-echo "  • dns-cloudflare — DNS on Cloudflare (works even with the CDN on)"
-echo "  • dns-arvan      — DNS on ArvanCloud / arvancloud.ir (works even with the CDN on)"
-CERT_MODE="$(ask 'Cert mode' 'standalone')"
-ARGS+=(--cert-mode "$CERT_MODE")
-if [ "$CERT_MODE" = "dns-cloudflare" ]; then
-  CF="$(ask 'Cloudflare API token (Zone:DNS:Edit)')"
-  [ -n "$CF" ] && ARGS+=(--cf-token "$CF")
-elif [ "$CERT_MODE" = "dns-arvan" ]; then
-  yel "Reminder: set the proxy/tunnel A record to DNS-only (cloud OFF) in ArvanCloud."
-  AK="$(ask 'ArvanCloud API key')"
-  [ -n "$AK" ] && ARGS+=(--arvan-token "$AK")
+# ============================ EXIT (foreign) =====================
+if [ "$RC" = "2" ]; then
+  echo
+  yel "سرور خارج فقط تانل است: بدون دامنه، بدون گواهی معتبر، بدون داشبورد."
+  echo "Foreign node = tunnel only. Best: paste the ready command that the Iran"
+  echo "install printed. Otherwise enter the SAME tunnel user/pass you used on Iran."
+  TP="$(ask 'پورت تانل / tunnel port' '8443')"
+  TU="$(ask 'یوزر تانل / tunnel user' 'tunnel')"
+  TPW="$(ask 'پسورد تانل / tunnel pass (خالی=ساخت خودکار)')"
+  [ -n "$TPW" ] || { TPW="$(gen 24)"; yel "پسورد ساخته‌شده / generated: $TPW  (باید روی ایران هم همین باشد)"; }
+  echo; info "Running foreign tunnel setup…"
+  exec ./setup.sh --role exit --self-signed --tunnel-port "$TP" --tunnel-user "$TU" --tunnel-pass "$TPW"
 fi
 
-if [ "$ROLE" = "entry" ]; then
-  echo; yel "Tunnel to the foreign EXIT server (use the values printed by the exit install):"
-  EXIT_HOST="$(ask 'Exit host (foreign subdomain)')"
-  EXIT_PORT="$(ask 'Exit tunnel port' '8443')"
-  TUSER="$(ask 'Tunnel user')"
-  TPASS="$(ask 'Tunnel password')"
-  [ -n "$EXIT_HOST" ] && ARGS+=(--exit-host "$EXIT_HOST")
-  [ -n "$EXIT_PORT" ] && ARGS+=(--exit-port "$EXIT_PORT")
-  [ -n "$TUSER" ] && ARGS+=(--tunnel-user "$TUSER")
-  [ -n "$TPASS" ] && ARGS+=(--tunnel-pass "$TPASS")
-  DASHD="$(ask 'Separate subdomain for the dashboard (optional, Enter to skip)')"
-  [ -n "$DASHD" ] && ARGS+=(--dashboard-domain "$DASHD")
-fi
+# ============================ ENTRY (Iran) =======================
+echo
+grn "سرور ایران — پنل مدیریت و پروکسیِ WHMCS اینجا نصب می‌شود."
+echo   "Iran node — the dashboard and the SOCKS/HTTPS proxy live here."
+echo
+echo "▸ ساب‌دامینِ پروکسی (همان که در WHMCS وارد می‌کنید)."
+echo "  یک رکورد A بسازید که به IP همین سرور ایران اشاره کند."
+echo "  مهم: در WHMCS باید همین «نام» را بگذارید، نه IP — چون گواهی SSL روی نام صادر"
+echo "  می‌شود و اگر IP بگذارید خطای cURL 51 می‌گیرید."
+echo "  (Proxy subdomain used in WHMCS; A record must point to THIS server.)"
+DOMAIN="$(ask 'ساب‌دامین / subdomain (e.g. proxy.digitalvps.ir)')"
+[ -n "$DOMAIN" ] || die "subdomain required / ساب‌دامین لازم است"
 
 echo
-info "Running: ./setup.sh ${ARGS[*]}"
-exec ./setup.sh "${ARGS[@]}"
+echo "▸ IP سرور خارج (تانل به آن وصل می‌شود)."
+echo "  The foreign server's public IP (the tunnel connects there)."
+EXIP="$(ask 'IP سرور خارج / foreign IP')"
+[ -n "$EXIP" ] || die "foreign IP required / IP خارج لازم است"
+TP="$(ask 'پورت تانل / tunnel port' '8443')"
+
+echo
+echo "▸ ایمیل برای Let's Encrypt (اختیاری) / email (optional)."
+EMAIL="$(ask 'email')"
+
+echo
+echo "▸ روش گواهی / certificate method:"
+echo "   standalone      : ساده — پورت ۸۰ باز و CDN خاموش  (simple; needs :80, CDN off)"
+echo "   dns-cloudflare  : دامنه روی Cloudflare (با CDN هم کار می‌کند)"
+echo "   dns-arvan       : دامنه روی ArvanCloud (با CDN هم کار می‌کند)"
+CM="$(ask 'cert mode' 'standalone')"
+
+# the Iran side mints the shared tunnel secret
+TU="tunnel"; TPW="$(gen 24)"
+
+ARGS=(--role entry --domain "$DOMAIN" --exit-host "$EXIP" --exit-port "$TP"
+      --tunnel-user "$TU" --tunnel-pass "$TPW" --tunnel-insecure --cert-mode "$CM")
+[ -n "$EMAIL" ] && ARGS+=(--email "$EMAIL")
+if [ "$CM" = "dns-cloudflare" ]; then
+  ARGS+=(--cf-token "$(ask 'Cloudflare API token (Zone:DNS:Edit)')")
+elif [ "$CM" = "dns-arvan" ]; then
+  yel "رکورد A را در ArvanCloud روی DNS-only (ابر خاموش) بگذارید."
+  ARGS+=(--arvan-token "$(ask 'ArvanCloud API key')")
+fi
+
+echo; info "Running Iran setup… / نصب سرور ایران…"
+./setup.sh "${ARGS[@]}"
+rc=$?
+[ "$rc" -eq 0 ] || { red "نصب ایران کامل نشد (کد $rc). خروجی بالا را بفرست."; exit "$rc"; }
+
+# hand the operator the exact command for the foreign server
+echo
+grn "═══════════════════════════════════════════════════════════════════"
+grn "  گام بعد — این دستور را روی سرور خارج ($EXIP) اجرا کنید:"
+grn "  NEXT — run this on the FOREIGN server ($EXIP):"
+grn "═══════════════════════════════════════════════════════════════════"
+echo
+echo "bash <(curl -fsSL https://raw.githubusercontent.com/$SLUG/$BRANCH/install.sh) \\"
+echo "     --role exit --self-signed --tunnel-port $TP --tunnel-user $TU --tunnel-pass $TPW"
+echo
+echo "پس از اجرای دستور بالا روی خارج، تانل بالا می‌آید و پروکسی کامل کار می‌کند."
+echo "(After that runs on the foreign box, the tunnel comes up and the proxy works.)"
+echo
+grn "این دستور در فایل زیر هم ذخیره شد:  /root/run-on-foreign-server.txt"
+{
+  echo "# Run this on the FOREIGN server ($EXIP):"
+  echo "bash <(curl -fsSL https://raw.githubusercontent.com/$SLUG/$BRANCH/install.sh) --role exit --self-signed --tunnel-port $TP --tunnel-user $TU --tunnel-pass $TPW"
+} > /root/run-on-foreign-server.txt
+chmod 600 /root/run-on-foreign-server.txt

@@ -36,8 +36,9 @@ transports (`tls`/`ws`/`wss`/CDN). This project uses gost for both nodes.
 ## What you need
 
 - Two Debian/Ubuntu servers with root (one local “entry”, one foreign “exit”).
-- Two DNS **A records** (one per server) — a valid SSL cert is issued per *hostname*, not per
-  IP, which is why WHMCS must reach the proxy by name. See [`docs/FA.md`](docs/FA.md#۲).
+- **One** DNS **A record** for the entry (Iran) server only — a valid SSL cert is issued per
+  *hostname*, not per IP, so WHMCS must reach the proxy **by name, never by IP**. The foreign
+  exit needs **no** subdomain (its tunnel uses a self‑signed cert).
 
 ## Install
 
@@ -58,16 +59,25 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Digitalvps-Ir/ByClaude-Proxy
 > cd ByClaude-ProxyForWhmcsWithSsl && sudo ./install.sh
 > ```
 
-Do the **foreign (EXIT)** server first, then the **Iran (ENTRY)** server with the tunnel
-credentials the exit step prints.
+**Run the Iran (ENTRY) server first** and pick option **1**. It asks (in Persian + English)
+for your proxy subdomain and the foreign server's IP, mints the tunnel secret, installs the
+panel + proxy, and prints a **ready one‑liner to paste on the foreign server**. Then run that
+one‑liner on the foreign box — it brings up the tunnel‑only exit (no domain, no dashboard).
 
 ### Manual (flags)
 
-**On the foreign (EXIT) server:**
+**On the Iran (ENTRY) server:**
 ```bash
-sudo ./setup.sh --role exit --domain tunnel.example.com --email you@example.com
+sudo ./setup.sh --role entry --domain proxy.example.com --email you@example.com \
+  --exit-host <FOREIGN_IP> --tunnel-user tunnel --tunnel-pass <SECRET> --tunnel-insecure
 ```
-It prints the tunnel user/password — copy them.
+
+**On the foreign (EXIT) server (tunnel only):**
+```bash
+sudo ./setup.sh --role exit --self-signed --tunnel-user tunnel --tunnel-pass <SECRET>
+```
+
+<details><summary>Legacy: foreign with its own domain + Let's Encrypt</summary>
 
 **On the local (ENTRY) server:**
 ```bash
@@ -76,6 +86,7 @@ sudo ./setup.sh --role entry --domain proxy.example.com --email you@example.com 
 ```
 It prints the exact **HTTPS/SOCKS endpoints, credentials, and a dashboard URL** to use in
 WHMCS (also saved to `/root/whmcs-proxy-credentials.txt`).
+</details>
 
 ### DNS on a CDN (ArvanCloud / Cloudflare)
 

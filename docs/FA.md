@@ -35,15 +35,17 @@
 وقتی WHMCS با cURL به پروکسی وصل می‌شود، گواهی را با **نامی که به آن وصل شده** مقایسه می‌کند
 (بررسی SNI و hostname). اگر با IP وصل شوید، این تطبیق شکست می‌خورد و همان خطای SSL برمی‌گردد.
 
-پس به دو ساب‌دامین نیاز داریم (نمونه):
+پس فقط به **یک ساب‌دامین** نیاز دارید (برای سرور ایران)؛ سرور خارج **هیچ ساب‌دامینی لازم ندارد**
+(تانلش با گواهی self-signed کار می‌کند):
 
-| نقش | ساب‌دامین نمونه | باید به کدام سرور اشاره کند |
+| نقش | ساب‌دامین | باید به کدام سرور اشاره کند |
 |-----|------------------|------------------------------|
-| ENTRY (ایران) | `proxy.digitalvps.ir` | `109.122.244.5` |
-| EXIT (خارج)   | `tunnel.digitalvps.ir` | `83.245.45.6` |
+| ENTRY (ایران) | `proxy.digitalvps.ir` *(دلخواه خودتان)* | `109.122.244.5` |
+| EXIT (خارج)   | — لازم نیست — | `83.245.45.6` |
 
-هر دو رکورد **A** ساده هستند (بدون پروکسی ابری/نارنجیِ Cloudflare در حالت پیش‌فرض تا صدور
-گواهی با روش HTTP ساده باشد). فقط این دو رکورد را در DNS بسازید.
+رکورد **A** ساده باشد و اگر روی Cloudflare/ArvanCloud است، **ابرش خاموش (DNS-only)** باشد.
+
+> در WHMCS همیشه همین **ساب‌دامین** را وارد کنید، نه IP — وگرنه خطای `cURL 51` می‌گیرید.
 
 > نکته درباره‌ی لاگ شما: آدرس `185.118.15.125` یک آی‌پی **داخل ایران** است و اتصال TLS به آن
 > حتی به‌صورت داخلی هم RST می‌خورد — یعنی پروکسی فعلی‌تان اصلاً TLS سالم سرو نمی‌کرده (خراب یا
@@ -54,9 +56,10 @@
 ## ۳) پیش‌نیازها
 
 - دو سرور Ubuntu/Debian با دسترسی root (شما دارید: ۱۰۹ ایران، ۸۳ خارج).
-- دو ساب‌دامین طبق جدول بالا.
-- پورت **۸۰/TCP** روی هر سرور موقتاً باز باشد (برای صدور گواهی). اگر نمی‌شود، از روش
-  `--cert-mode dns-cloudflare` استفاده کنید (پایین توضیح داده شده).
+- **یک** ساب‌دامین که به IP سرور ایران اشاره کند (سرور خارج ساب‌دامین نمی‌خواهد).
+- روی **سرور ایران** پورت **۸۰/TCP** موقتاً باز باشد (برای صدور گواهی). اگر نمی‌شود، از
+  `--cert-mode dns-cloudflare` یا `--cert-mode dns-arvan` استفاده کنید.
+- روی **سرور خارج** پورت تانل (پیش‌فرض `8443/TCP`) باز باشد.
 
 ---
 
@@ -82,38 +85,38 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Digitalvps-Ir/ByClaude-Proxy
 > ساخت توکن: GitHub → Settings → Developer settings → **Fine-grained tokens** → دسترسی
 > فقط به همین ریپو با مجوز **Contents: Read-only**.
 
-نصب‌کننده اول روی **سرور خارج (EXIT)** و بعد **سرور ایران (ENTRY)** اجرا می‌شود. اگر ترجیح
-می‌دهید دستی و با فلگ‌ها اجرا کنید، ادامه را ببینید.
+**ترتیب جدید و ساده: اول ایران، بعد خارج.**
 
-### روش دستی — گام ۱: روی سرور **خارج** (EXIT، ۸۳)
+### گام ۱ — روی سرور **ایران** (۱۰۹)
+یک‌خط بالا را بزنید و **گزینه ۱ (سرور ایران)** را انتخاب کنید. نصب‌کننده به فارسی می‌پرسد:
+- **ساب‌دامین پروکسی** (که در WHMCS می‌گذارید)،
+- **IP سرور خارج**،
+- ایمیل و روش گواهی.
 
-```bash
-sudo ./setup.sh --role exit \
-  --domain tunnel.digitalvps.ir \
-  --email you@example.com
-```
+کلید تانل را **خودش می‌سازد** و در پایان یک **دستور آماده برای سرور خارج** چاپ می‌کند
+(و در `/root/run-on-foreign-server.txt` ذخیره می‌کند).
 
-خروجی، مقادیر تانل را چاپ می‌کند (این‌ها را برای گام بعد نگه دارید):
-
-```
---exit-host  tunnel.digitalvps.ir
---exit-port  8443
---tunnel-user tunnel
---tunnel-pass XXXXXXXXXXXXXXXXXXXX
-```
-
-### گام ۲ — روی سرور **ایران** (ENTRY، ۱۰۹)
-
-با همان مقادیر تانلِ چاپ‌شده:
+### گام ۲ — روی سرور **خارج** (۸۳)
+فقط همان **دستور آماده‌ای** که گام ۱ چاپ کرد را کپی و روی سرور خارج اجرا کنید. شکلش:
 
 ```bash
-sudo ./setup.sh --role entry \
-  --domain proxy.digitalvps.ir \
-  --email you@example.com \
-  --exit-host tunnel.digitalvps.ir \
-  --tunnel-user tunnel \
-  --tunnel-pass XXXXXXXXXXXXXXXXXXXX
+bash <(curl -fsSL https://raw.githubusercontent.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl/claude/whmcs-proxy-ssl-setup-obed47/install.sh) \
+     --role exit --self-signed --tunnel-port 8443 --tunnel-user tunnel --tunnel-pass <کلیدی که گام ۱ ساخت>
 ```
+
+همین. سرور خارج فقط تانل است (بدون ساب‌دامین، بدون داشبورد). به‌محض اجرای این دستور، تانل بالا
+می‌آید و پروکسیِ ایران کامل کار می‌کند.
+
+<details><summary>روش کاملاً دستی با فلگ‌ها (اختیاری)</summary>
+
+```bash
+# ایران:
+sudo ./setup.sh --role entry --domain proxy.digitalvps.ir --email you@example.com \
+  --exit-host <IP-خارج> --tunnel-user tunnel --tunnel-pass <SECRET> --tunnel-insecure
+# خارج:
+sudo ./setup.sh --role exit --self-signed --tunnel-user tunnel --tunnel-pass <SECRET>
+```
+</details>
 
 در پایان، اطلاعاتی که در WHMCS وارد می‌کنید چاپ و در `/root/whmcs-proxy-credentials.txt`
 ذخیره می‌شود:
