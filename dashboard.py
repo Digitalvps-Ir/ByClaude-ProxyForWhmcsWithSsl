@@ -33,6 +33,7 @@ import gostctl
 
 CSRF = secrets.token_urlsafe(24)
 LISTEN_ADDR = os.environ.get("DASH_ADDR", "0.0.0.0")
+WHMCSPROXY_BIN = os.environ.get("WHMCSPROXY_BIN", "/usr/local/bin/whmcsproxy")
 
 
 # --------------------------------------------------------------------------
@@ -74,22 +75,58 @@ def page(state, notice=""):
         port_fields += f"""
           <label>{name}<input name="{name}" type="number" value="{ports.get(name,0)}"></label>"""
 
+    domain_block = ""
+    if role == "entry":
+        dd = state.get("dashboard_domain", "")
+        domain_block = f"""
+      <section>
+        <h2>🌐 Domains &amp; SSL</h2>
+        <p class="muted">Changing a subdomain re-issues a valid Let's Encrypt certificate and applies it
+        everywhere automatically. Create the DNS A record for the new subdomain (pointing to this
+        server) <b>before</b> submitting.</p>
+        <p class="muted">Cert mode: <code>standalone</code> (needs :80, CDN off) ·
+        <code>dns-cloudflare</code> · <code>dns-arvan</code> (both work with the CDN on;
+        put the API token in the last field).</p>
+        <form method="post" action="/domain/proxy" class="grid" onsubmit="return confirm('Re-issue SSL and switch the proxy domain?')">
+          {csrf_field()}
+          <label>Proxy subdomain (used in WHMCS)<input name="domain" value="{html.escape(domain)}" required></label>
+          <label>Email (optional)<input name="email" placeholder="you@example.com"></label>
+          <label>Cert mode<input name="mode" value="standalone"></label>
+          <label>CDN API token (dns-* only)<input name="token" placeholder="Cloudflare / ArvanCloud key"></label>
+          <button class="primary">Change proxy domain</button>
+        </form>
+        <form method="post" action="/domain/dashboard" class="grid" style="margin-top:12px" onsubmit="return confirm('Move the dashboard to a new subdomain? You will reconnect at the new URL.')">
+          {csrf_field()}
+          <label>Dashboard subdomain<input name="domain" value="{html.escape(dd)}" placeholder="panel.example.com"></label>
+          <label>Email (optional)<input name="email" placeholder="you@example.com"></label>
+          <label>Cert mode<input name="mode" value="standalone"></label>
+          <label>CDN API token (dns-* only)<input name="token" placeholder="Cloudflare / ArvanCloud key"></label>
+          <button>Change dashboard domain</button>
+        </form>
+      </section>"""
+
     exit_block = ""
     if role == "entry":
         ex = state.get("exit", {})
+        opts = state.get("tunnel_opts", {})
         exit_block = f"""
       <section>
         <h2>🔐 Tunnel to exit node (foreign server)</h2>
-        <p class="muted">The encrypted TLS relay tunnel that carries traffic abroad.</p>
+        <p class="muted">Encrypted relay tunnel that carries traffic abroad —
+        transport <code>{html.escape(str(opts.get('transport','tls')))}</code>,
+        mux <code>{html.escape(str(opts.get('mux',True)))}</code>,
+        keepalive <code>{html.escape(str(opts.get('keepalive','15s')))}</code>.</p>
         <form method="post" action="/exit" class="grid">
           {csrf_field()}
           <label>Exit host (FQDN)<input name="host" value="{html.escape(ex.get('host',''))}"></label>
           <label>Exit port<input name="port" type="number" value="{ex.get('port',8443)}"></label>
           <label>Tunnel user<input name="user" value="{html.escape(ex.get('user',''))}"></label>
           <label>Tunnel password<input name="password" value="{html.escape(ex.get('password',''))}"></label>
+          <label>Transport<input name="transport" value="{html.escape(str(opts.get('transport','tls')))}"></label>
           <label class="chk"><input type="checkbox" name="secure" {'checked' if ex.get('secure',True) else ''}> verify exit certificate</label>
           <button class="primary">Save tunnel</button>
         </form>
+        <form method="post" action="/tunnel/test" style="margin-top:10px">{csrf_field()}<button>🚀 Test tunnel (latency + egress IP)</button></form>
       </section>"""
 
     whmcs = ""
@@ -147,7 +184,7 @@ def page(state, notice=""):
 <body>
 <header>
   <h1>🛡️ WHMCS Proxy Panel <span class="muted">({html.escape(role)} · {html.escape(domain)})</span></h1>
-  <div>gost: <span class="badge">{html.escape(active)}</span></div>
+  <div><a href="/logs" style="color:#7aa2ff;margin-inline-end:14px">📜 Logs</a>gost: <span class="badge">{html.escape(active)}</span></div>
 </header>
 <main>
   {notice_html}
@@ -162,6 +199,7 @@ def page(state, notice=""):
     <table>{eps or '<tr><td>—</td></tr>'}</table>
   </section>
   {whmcs}
+  {domain_block}
   <section>
     <h2>👤 Proxy users</h2>
     <table>
@@ -206,6 +244,58 @@ def hidden(name, value):
 
 def csrf_field():
     return f'<input type="hidden" name="csrf" value="{CSRF}">'
+
+
+def _fmt_bytes(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "0"
+    for unit in ("B", "K", "M", "G"):
+        if n < 1024:
+            return f"{n:.0f}{unit}"
+        n /= 1024
+    return f"{n:.0f}T"
+
+
+def logs_page(state, auto=True):
+    rows = gostctl.read_logs(state, limit=300)
+    body = ""
+    for r in rows:
+        body += (f"<tr><td>{html.escape(r['time'][:23])}</td>"
+                 f"<td><code>{html.escape(str(r['client']))}</code></td>"
+                 f"<td>{html.escape(str(r['user']))}</td>"
+                 f"<td>{html.escape(str(r['service']))}</td>"
+                 f"<td><code>{html.escape(str(r['host']))}</code></td>"
+                 f"<td>{_fmt_bytes(r['in'])}/{_fmt_bytes(r['out'])}</td></tr>")
+    refresh = '<meta http-equiv="refresh" content="5">' if auto else ""
+    logfile = (state.get("log", {}) or {}).get("file", "")
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">{refresh}
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proxy request logs</title>
+<style>
+  body {{ font-family: system-ui, Tahoma, sans-serif; margin:0; background:#0b1020; color:#e6e9f0; }}
+  header {{ background:#111a33; padding:16px 22px; border-bottom:1px solid #223; display:flex; justify-content:space-between; align-items:center;}}
+  a {{ color:#7aa2ff; text-decoration:none; }}
+  main {{ max-width:1100px; margin:18px auto; padding:0 14px; }}
+  table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+  td, th {{ padding:7px 9px; border-bottom:1px solid #24304f; text-align:left; }}
+  th {{ color:#8b93a7; position:sticky; top:0; background:#0b1020; }}
+  code {{ background:#131c36; padding:1px 5px; border-radius:5px; }}
+  .muted {{ color:#8b93a7; font-size:12px; }}
+</style></head>
+<body>
+<header><b>📜 Proxy request logs</b> <span class="muted">(auto-refresh 5s — source IP → destination)</span>
+  <span><a href="/logs?auto=0">pause</a> · <a href="/">← back</a></span></header>
+<main>
+  <p class="muted">source: <code>{html.escape(logfile)}</code> — showing {len(rows)} most recent requests</p>
+  <table>
+    <tr><th>Time (UTC)</th><th>Source IP</th><th>User</th><th>Service</th><th>Destination</th><th>In/Out</th></tr>
+    {body or '<tr><td colspan=6 class=muted>No requests logged yet.</td></tr>'}
+  </table>
+</main>
+</body></html>"""
 
 
 # --------------------------------------------------------------------------
@@ -256,16 +346,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _json(self, obj, code=200):
+        import json as _json
+        data = _json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         if not self._require_auth():
             return
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/", ""):
-            self._html("not found", 404)
-            return
         q = urllib.parse.parse_qs(parsed.query)
-        notice = (q.get("m", [""])[0])
-        self._html(page(gostctl.load_state(), notice))
+        if parsed.path in ("/", ""):
+            notice = (q.get("m", [""])[0])
+            self._html(page(gostctl.load_state(), notice))
+        elif parsed.path == "/logs":
+            auto = q.get("auto", ["1"])[0] != "0"
+            self._html(logs_page(gostctl.load_state(), auto=auto))
+        elif parsed.path == "/api/logs":
+            self._json(gostctl.read_logs(gostctl.load_state(), limit=300))
+        else:
+            self._html("not found", 404)
 
     def _read_form(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -335,8 +439,40 @@ class Handler(BaseHTTPRequestHandler):
             ex["user"] = form.get("user", "").strip()
             ex["password"] = form.get("password", "").strip()
             ex["secure"] = form.get("secure") == "on"
+            tr = form.get("transport", "").strip()
+            if tr:
+                state.setdefault("tunnel_opts", {})["transport"] = tr
             gostctl.save_state(state)
             return "tunnel settings saved (click Apply)"
+        if path in ("/domain/proxy", "/domain/dashboard"):
+            nd = form.get("domain", "").strip()
+            if not nd:
+                return "subdomain required"
+            email = form.get("email", "").strip()
+            mode = form.get("mode", "standalone").strip() or "standalone"
+            token = form.get("token", "").strip()
+            sub = "migrate-proxy-domain" if path == "/domain/proxy" else "migrate-dashboard-domain"
+            cmd = [WHMCSPROXY_BIN, sub, nd, email, mode]
+            if token:
+                cmd.append(token)
+            # run detached: certbot may take a while and can restart this dashboard
+            try:
+                subprocess.Popen(cmd,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            except FileNotFoundError:
+                return f"{WHMCSPROXY_BIN} not found"
+            where = "proxy" if path == "/domain/proxy" else "dashboard"
+            return (f"issuing certificate for {nd} and switching the {where}… "
+                    f"give it ~1 minute, then reconnect at the new address.")
+        if path == "/tunnel/test":
+            try:
+                out = subprocess.run([WHMCSPROXY_BIN, "health"],
+                                     capture_output=True, text=True, timeout=30)
+                msg = (out.stdout + out.stderr).strip().splitlines()
+                return msg[-1] if msg else "tunnel test finished"
+            except Exception as exc:
+                return f"tunnel test error: {exc}"
         if path == "/admin/passwd":
             pw = form.get("password", "").strip()
             if len(pw) < 6:
@@ -380,7 +516,7 @@ class TLSServer(ThreadingHTTPServer):
 def main():
     state = gostctl.load_state()
     port = int(state.get("ports", {}).get("dashboard", 9443))
-    cert, key = gostctl.cert_paths(state)
+    cert, key = gostctl.dashboard_cert_paths(state)
     ctx = None
     scheme = "http (no cert found!)"
     if cert and os.path.exists(cert) and key and os.path.exists(key):

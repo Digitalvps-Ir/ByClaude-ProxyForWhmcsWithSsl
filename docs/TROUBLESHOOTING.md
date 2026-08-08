@@ -25,6 +25,19 @@ whmcs-proxy show-config         # the exact gost config in use
   ```bash
   --cert-mode existing --cert-file /path/fullchain.pem --key-file /path/privkey.pem
   ```
+- DNS on **ArvanCloud**? Use the built-in DNS-01 hook (works with the CDN on, no port 80):
+  ```bash
+  --cert-mode dns-arvan --arvan-token <ARVANCLOUD_API_KEY>
+  # if the zone is misdetected, set it explicitly:
+  ARVAN_ZONE=example.ir sudo ./setup.sh … --cert-mode dns-arvan --arvan-token <KEY>
+  ```
+
+## CDN (ArvanCloud / Cloudflare): proxy or tunnel “not connecting”
+
+A CDN only relays normal website HTTP(S). It will **not** carry a forward-proxy `CONNECT`,
+SOCKS, or the relay tunnel. Set the **A record for the proxy and tunnel subdomains to
+DNS-only (cloud/proxy OFF)** so it points straight at the server. The Let's Encrypt cert
+still issues fine through DNS-01 (`--cert-mode dns-cloudflare` / `dns-arvan`) regardless.
 
 ## WHMCS still shows `cURL error 35`
 

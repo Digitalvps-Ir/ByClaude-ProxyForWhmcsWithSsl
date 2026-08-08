@@ -49,6 +49,10 @@ def default_state(role="entry", domain=""):
             "certFile": "",
             "keyFile": "",
         },
+        # the dashboard can live on its own subdomain / certificate; empty means
+        # reuse the main domain + certificate above.
+        "dashboard_domain": "",
+        "dashboard_cert": {"certFile": "", "keyFile": ""},
         "ports": {
             "https": 443,   # HTTPS forward proxy (TLS, valid cert) — WHMCS uses this
             "socks": 1080,  # SOCKS5 (auth)
@@ -64,6 +68,15 @@ def default_state(role="entry", domain=""):
             "password": "",
             "secure": True,  # verify the exit's certificate (recommended)
         },
+        # tunnel performance / transport tuning (must match on both nodes)
+        "tunnel_opts": {
+            "transport": "tls",   # tls | mtls | wss | ws
+            "mux": True,          # multiplex many streams over one connection (low latency)
+            "keepalive": "15s",   # keep the tunnel warm to avoid reconnect drops
+            "path": "/tunnel",    # only used by ws/wss transports
+        },
+        # request logging (parsed by the dashboard "Logs" page)
+        "log": {"file": "/var/log/gost/gost.log", "level": "info"},
         # proxy users WHMCS / clients authenticate with (entry role) OR
         # tunnel users the entry node authenticates with (exit role)
         "users": [],
@@ -117,6 +130,13 @@ def verify_password(password, salt, expected_hex):
 # --------------------------------------------------------------------------
 # certificate path resolution
 # --------------------------------------------------------------------------
+def _le_paths(domain):
+    return (
+        os.path.join(LE_LIVE, domain, "fullchain.pem"),
+        os.path.join(LE_LIVE, domain, "privkey.pem"),
+    )
+
+
 def cert_paths(state):
     cert = state.get("cert", {})
     cf, kf = cert.get("certFile", ""), cert.get("keyFile", "")
@@ -125,10 +145,81 @@ def cert_paths(state):
     domain = state.get("domain", "")
     if not domain:
         return "", ""
-    return (
-        os.path.join(LE_LIVE, domain, "fullchain.pem"),
-        os.path.join(LE_LIVE, domain, "privkey.pem"),
-    )
+    return _le_paths(domain)
+
+
+def dashboard_cert_paths(state):
+    """Certificate the dashboard listens with — its own subdomain if configured,
+    otherwise the main proxy certificate."""
+    dc = state.get("dashboard_cert", {})
+    if dc.get("certFile") and dc.get("keyFile"):
+        return dc["certFile"], dc["keyFile"]
+    dd = state.get("dashboard_domain", "")
+    if dd:
+        return _le_paths(dd)
+    return cert_paths(state)
+
+
+def dashboard_host(state):
+    return state.get("dashboard_domain") or state.get("domain", "")
+
+
+# ---- transport mapping (tunnel) -----------------------------------------
+_TRANSPORTS = {"tls", "mtls", "ws", "wss"}
+
+
+def _transport(state):
+    t = (state.get("tunnel_opts", {}) or {}).get("transport", "tls")
+    return t if t in _TRANSPORTS else "tls"
+
+
+def _tunnel_listener(state, cf, kf):
+    """Listener block for the exit node's relay tunnel."""
+    t = _transport(state)
+    opts = state.get("tunnel_opts", {}) or {}
+    tls = {"certFile": cf, "keyFile": kf}
+    if t == "tls":
+        return {"type": "tls", "tls": tls}
+    if t == "mtls":
+        return {"type": "mtls", "tls": tls}
+    if t in ("ws", "wss"):
+        lis = {"type": t, "metadata": {"path": opts.get("path", "/tunnel")}}
+        if t == "wss":
+            lis["tls"] = tls
+        return lis
+    return {"type": "tls", "tls": tls}
+
+
+def _tunnel_dialer(state):
+    """Dialer block for the entry node reaching the exit."""
+    t = _transport(state)
+    ex = state.get("exit", {})
+    opts = state.get("tunnel_opts", {}) or {}
+    tlsblk = {"serverName": ex.get("host", ""), "secure": bool(ex.get("secure", True))}
+    meta = {}
+    if opts.get("keepalive"):
+        meta = {"keepAlive": True, "ttl": opts.get("keepalive", "15s")}
+    if t == "tls":
+        d = {"type": "tls", "tls": tlsblk}
+    elif t == "mtls":
+        d = {"type": "mtls", "tls": tlsblk}
+    elif t == "ws":
+        d = {"type": "ws", "metadata": {"path": opts.get("path", "/tunnel")}}
+    elif t == "wss":
+        d = {"type": "wss", "tls": tlsblk, "metadata": {"path": opts.get("path", "/tunnel")}}
+    else:
+        d = {"type": "tls", "tls": tlsblk}
+    if meta:
+        d.setdefault("metadata", {}).update(meta)
+    return d
+
+
+def _log_block(state):
+    lg = state.get("log", {}) or {}
+    f = lg.get("file", "")
+    if not f:
+        return None
+    return {"output": f, "level": lg.get("level", "info"), "format": "json"}
 
 
 # --------------------------------------------------------------------------
@@ -158,16 +249,16 @@ def _render_exit(state, cf, kf, ports):
                 "name": "relay-tunnel",
                 "addr": f":{tunnel_port}",
                 "handler": {"type": "relay", "auther": "tunnel-auth"},
-                "listener": {
-                    "type": "tls",
-                    "tls": {"certFile": cf, "keyFile": kf},
-                },
+                "listener": _tunnel_listener(state, cf, kf),
             }
         ],
         "authers": [
             {"name": "tunnel-auth", "auths": users}
         ],
     }
+    lg = _log_block(state)
+    if lg:
+        cfg["log"] = lg
     return cfg
 
 
@@ -202,6 +293,21 @@ def _render_entry(state, cf, kf, ports):
             "listener": {"type": "tcp"},
         })
 
+    opts = state.get("tunnel_opts", {}) or {}
+    connector_meta = {}
+    if opts.get("mux", True):
+        connector_meta["mux"] = True
+
+    connector = {
+        "type": "relay",
+        "auth": {
+            "username": ex.get("user", ""),
+            "password": ex.get("password", ""),
+        },
+    }
+    if connector_meta:
+        connector["metadata"] = connector_meta
+
     chain = {
         "name": "to-exit",
         "hops": [
@@ -211,20 +317,8 @@ def _render_entry(state, cf, kf, ports):
                     {
                         "name": "exit",
                         "addr": f"{ex.get('host','')}:{int(ex.get('port', 8443))}",
-                        "connector": {
-                            "type": "relay",
-                            "auth": {
-                                "username": ex.get("user", ""),
-                                "password": ex.get("password", ""),
-                            },
-                        },
-                        "dialer": {
-                            "type": "tls",
-                            "tls": {
-                                "serverName": ex.get("host", ""),
-                                "secure": bool(ex.get("secure", True)),
-                            },
-                        },
+                        "connector": connector,
+                        "dialer": _tunnel_dialer(state),
                     }
                 ],
             }
@@ -236,6 +330,9 @@ def _render_entry(state, cf, kf, ports):
         "chains": [chain],
         "authers": [{"name": "proxy-auth", "auths": users}],
     }
+    lg = _log_block(state)
+    if lg:
+        cfg["log"] = lg
     return cfg
 
 
@@ -304,6 +401,58 @@ def endpoints(state):
     if ports.get("http"):
         out.append(("HTTP proxy (plain)", f"http://{domain}:{ports.get('http')}"))
     return out
+
+
+# --------------------------------------------------------------------------
+# request log parsing (for the dashboard "Logs" page and `logtail`)
+# --------------------------------------------------------------------------
+def read_logs(state, limit=200):
+    """Return the most recent completed proxy requests as dicts:
+    {time, client, user, service, host, in, out}."""
+    path = (state.get("log", {}) or {}).get("file", "")
+    if not path or not os.path.exists(path):
+        return []
+    rows = []
+    try:
+        with open(path, "r", errors="replace") as fh:
+            # tail: read the file, keep last ~4000 lines
+            lines = fh.readlines()[-4000:]
+    except OSError:
+        return []
+    import json as _json
+    for line in lines:
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            o = _json.loads(line)
+        except ValueError:
+            continue
+        # completed request lines carry host + duration + a client address
+        if o.get("kind") != "handler" or "host" not in o or "duration" not in o:
+            continue
+        rows.append({
+            "time": o.get("time", ""),
+            "client": o.get("client", o.get("remote", "")),
+            "user": o.get("user", ""),
+            "service": o.get("service", ""),
+            "host": o.get("host", ""),
+            "in": o.get("inputBytes", 0),
+            "out": o.get("outputBytes", 0),
+        })
+    return rows[-limit:][::-1]  # newest first
+
+
+def set_domain(state, new_domain, which="proxy"):
+    """Point the proxy (or dashboard) at a new subdomain. Assumes the cert for
+    new_domain already exists in the Let's Encrypt live directory."""
+    if which == "dashboard":
+        state["dashboard_domain"] = new_domain
+        state["dashboard_cert"] = {"certFile": "", "keyFile": ""}
+    else:
+        state["domain"] = new_domain
+        state["cert"] = {"certFile": "", "keyFile": ""}
+    return state
 
 
 # --------------------------------------------------------------------------
@@ -418,6 +567,47 @@ def cmd_setexit(args):
         cmd_apply(args)
 
 
+def cmd_setdomain(args):
+    state = load_state()
+    set_domain(state, args.domain, which="dashboard" if args.dashboard else "proxy")
+    save_state(state)
+    tgt = "dashboard" if args.dashboard else "proxy"
+    print(f"{tgt} domain -> {args.domain}")
+    if args.apply:
+        cmd_apply(args)
+
+
+def cmd_settransport(args):
+    state = load_state()
+    opts = state.setdefault("tunnel_opts", {})
+    if args.transport is not None:
+        if args.transport not in _TRANSPORTS:
+            raise SystemExit(f"transport must be one of {sorted(_TRANSPORTS)}")
+        opts["transport"] = args.transport
+    if args.mux is not None:
+        opts["mux"] = (args.mux == "on")
+    if args.keepalive is not None:
+        opts["keepalive"] = args.keepalive
+    save_state(state)
+    print(f"tunnel_opts -> {opts}")
+    if args.apply:
+        cmd_apply(args)
+
+
+def cmd_logtail(args):
+    state = load_state()
+    rows = read_logs(state, limit=args.limit)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("(no request logs yet — file: %s)" % (state.get("log", {}).get("file")))
+        return
+    print(f"{'time':24} {'source ip':22} {'user':12} {'service':13} destination")
+    for r in rows:
+        print(f"{r['time'][:23]:24} {r['client']:22} {r['user']:12} {r['service']:13} {r['host']}")
+
+
 def cmd_render(args):
     state = load_state()
     path = write_config(state)
@@ -435,15 +625,23 @@ def cmd_apply(args):
 
 def cmd_status(args):
     state = load_state()
-    print(f"role:     {state.get('role')}")
-    print(f"domain:   {state.get('domain')}")
-    print(f"gost:     {service_active()}")
+    print(f"role:       {state.get('role')}")
+    print(f"domain:     {state.get('domain')}")
+    dd = state.get("dashboard_domain")
+    print(f"dashboard:  {dd or '(same as domain)'} :{state.get('ports',{}).get('dashboard')}")
+    print(f"gost:       {service_active()}")
     exp = cert_expiry(state)
-    print(f"cert exp: {exp or 'unknown / not issued yet'}")
+    print(f"cert exp:   {exp or 'unknown / not issued yet'}")
+    if state.get("role") == "entry":
+        opts = state.get("tunnel_opts", {})
+        ex = state.get("exit", {})
+        print(f"tunnel:     -> {ex.get('host')}:{ex.get('port')}  "
+              f"[{opts.get('transport','tls')} mux={opts.get('mux')} "
+              f"keepalive={opts.get('keepalive')}]")
     print("endpoints:")
     for label, val in endpoints(state):
         print(f"  - {label}: {val}")
-    print(f"users:    {len(_enabled_users(state))} enabled / {len(state.get('users', []))} total")
+    print(f"users:      {len(_enabled_users(state))} enabled / {len(state.get('users', []))} total")
 
 
 def cmd_show(args):
@@ -508,6 +706,24 @@ def build_parser():
     pe.add_argument("--insecure", action="store_true")
     pe.add_argument("--apply", action="store_true")
     pe.set_defaults(func=cmd_setexit)
+
+    pdom = sub.add_parser("set-domain", help="point the proxy (or dashboard) at a new subdomain")
+    pdom.add_argument("domain")
+    pdom.add_argument("--dashboard", action="store_true", help="change the dashboard domain instead of the proxy")
+    pdom.add_argument("--apply", action="store_true")
+    pdom.set_defaults(func=cmd_setdomain)
+
+    ptr = sub.add_parser("set-transport", help="tune the tunnel transport/performance")
+    ptr.add_argument("--transport", choices=sorted(_TRANSPORTS))
+    ptr.add_argument("--mux", choices=["on", "off"])
+    ptr.add_argument("--keepalive", help="e.g. 15s")
+    ptr.add_argument("--apply", action="store_true")
+    ptr.set_defaults(func=cmd_settransport)
+
+    plog = sub.add_parser("logtail", help="show recent proxy requests (source IP -> destination)")
+    plog.add_argument("--limit", type=int, default=50)
+    plog.add_argument("--json", action="store_true")
+    plog.set_defaults(func=cmd_logtail)
 
     sub.add_parser("render", help="write gost config from state").set_defaults(func=cmd_render)
     sub.add_parser("apply", help="write config and restart gost").set_defaults(func=cmd_apply)

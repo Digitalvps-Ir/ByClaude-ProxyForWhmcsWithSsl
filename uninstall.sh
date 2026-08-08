@@ -20,9 +20,10 @@ systemctl daemon-reload || true
 
 echo "Removing files…"
 rm -rf /opt/whmcs-proxy
-rm -f /usr/local/bin/whmcs-proxy /usr/local/bin/gost
+rm -f /usr/local/bin/whmcsproxy /usr/local/bin/whmcs-proxy /usr/local/bin/gost
 rm -f /etc/letsencrypt/renewal-hooks/deploy/10-reload-whmcs-proxy.sh
-rm -rf /etc/gost
+rm -f /etc/logrotate.d/whmcs-proxy /etc/sysctl.d/99-whmcs-proxy.conf /etc/modules-load.d/bbr.conf
+rm -rf /etc/gost /var/log/gost
 
 if [ "$PURGE_CERTS" = "1" ] && [ -n "$DOMAIN" ]; then
   echo "Deleting certificate for $DOMAIN…"

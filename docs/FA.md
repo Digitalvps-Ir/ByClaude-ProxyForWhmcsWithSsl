@@ -62,9 +62,25 @@
 
 ## ۴) نصب — گام به گام
 
-فایل‌های پروژه را روی هر دو سرور کپی کنید (مثلاً با `git clone` یا `scp` کل پوشه).
+### روش سریع (نصب تک‌خطی از گیت‌هاب)
 
-### گام ۱ — روی سرور **خارج** (EXIT، ۸۳)
+روی هر سرور، به‌صورت root این یک خط را بزنید؛ خودش پروژه را کلون و نصب می‌کند و چند سؤال می‌پرسد:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl/claude/whmcs-proxy-ssl-setup-obed47/install.sh)
+```
+
+اگر `raw.githubusercontent.com` در دسترس نبود، به‌جایش کلون کنید:
+
+```bash
+git clone -b claude/whmcs-proxy-ssl-setup-obed47 https://github.com/Digitalvps-Ir/ByClaude-ProxyForWhmcsWithSsl.git
+cd ByClaude-ProxyForWhmcsWithSsl && sudo ./install.sh
+```
+
+نصب‌کننده اول روی **سرور خارج (EXIT)** و بعد **سرور ایران (ENTRY)** اجرا می‌شود. اگر ترجیح
+می‌دهید دستی و با فلگ‌ها اجرا کنید، ادامه را ببینید.
+
+### روش دستی — گام ۱: روی سرور **خارج** (EXIT، ۸۳)
 
 ```bash
 sudo ./setup.sh --role exit \
@@ -158,13 +174,41 @@ php examples/whmcs-proxy-test.php https://whmcs:PASSWORD@proxy.digitalvps.ir:443
 > ufw allow from <آی‌پی-شما> to any port 9443 proto tcp
 > ```
 
-همین کارها با خط فرمان هم ممکن است:
+بخش **📜 Logs** داشبورد، درخواست‌های عبوری از پروکسی را نشان می‌دهد: **آی‌پی مبدأ**، یوزر،
+سرویس (HTTPS/SOCKS)، مقصد و حجم — با رفرش خودکار.
+
+می‌توانید یک **ساب‌دامین جدا برای داشبورد** هم تعریف کنید و حتی از داخل خود داشبورد
+(بخش «Domains & SSL») ساب‌دامین پروکسی یا داشبورد را عوض کنید؛ گواهی جدید **خودکار** صادر و
+همه‌جا اعمال می‌شود.
+
+## ۶.۱) کنسول تحت SSH — دستور `whmcsproxy`
+
+کافی است در SSH بزنید:
+
 ```bash
-whmcs-proxy status
-whmcs-proxy useradd myuser --apply
-whmcs-proxy passwd whmcs --apply
-whmcs-proxy list-users
-whmcs-proxy set-port https 8443 --apply
+whmcsproxy
+```
+
+یک منوی کامل (شبیه پنل x-ui) باز می‌شود با گزینه‌ها:
+
+```
+ 1) Status & endpoints          6) Tunnel (exit / transport / benchmark)
+ 2) Proxy users                 7) Network performance tuning (BBR)
+ 3) Ports                       8) Request logs (source IP → destination)
+ 4) Change proxy SSL subdomain  9) SSL (info / renew now / auto-renew)
+ 5) Change dashboard subdomain 10) Services   11) Credentials   12) Uninstall
+```
+
+گزینه‌ی ۴ و ۵ ساب‌دامین را عوض می‌کنند و **گواهی را خودکار صادر/جابجا و روی کل کانفیگ‌ها
+اعمال** می‌کنند. بدون منو هم کار می‌کند:
+```bash
+whmcsproxy status
+whmcsproxy useradd myuser --apply
+whmcsproxy passwd whmcs --apply
+whmcsproxy set-port https 8443 --apply
+whmcsproxy benchmark            # پینگ/جیتر/پکت‌لاس/پهنای‌باند تانل
+whmcsproxy logtail --limit 40   # لاگ درخواست‌ها
+whmcsproxy migrate-proxy-domain proxy2.yourdomain.com you@mail.com standalone
 ```
 
 ---
@@ -183,11 +227,61 @@ certbot renew --dry-run
 
 ---
 
-## ۸) اگر تانل به خارج فیلتر شد (پلن B)
+## ۸) پرفورمنس تانل (سرعت، پینگ، جیتر، پکت‌لاس)
 
-حالت پیش‌فرض (`relay+tls`) معمولاً کار می‌کند. اگر هاپِ ایران→خارج مختل شد، سراغ ترنسپورت
-مقاوم‌تر بروید (WebSocket روی TLS، قابل عبور از CDN). راهنما در
-[`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md) بخش «Tunnel resilience».
+نصب‌کننده برای بیشترین throughput و کمترین تأخیر این‌ها را **خودکار** انجام می‌دهد:
+- **BBR** به‌عنوان congestion control + صف‌بندی **fq**،
+- بافرهای سوکت بزرگ (تا ۶۴MB) برای لینک‌های راه‌دور،
+- **TCP Fast Open**، غیرفعال‌کردن slow-start-after-idle، **MTU probing**، افزایش backlog و
+  سقف فایل‌دیسکریپتور،
+- **مالتی‌پلکس (mux)** روی تانل تا هر درخواست هندشیک TLS جدید نخواهد (تأخیر پایین‌تر) و
+  **keepalive** تا تانل گرم بماند و قطعی/دراپ نداشته باشد.
+
+اندازه‌گیری کیفیت تانل (روی سرور ایران):
+```bash
+whmcsproxy benchmark
+```
+خروجی شامل: پکت‌لاس و جیتر مسیر تا خروجی، **تأخیر و jitter درخواست از داخل تانل** (۲۰ نمونه)،
+**پهنای‌باند** (دانلود ۱۰MB)، و آی‌پی خروجی که اینترنت می‌بیند.
+
+اگر خواستید ترنسپورت را عوض کنید (مثلاً `wss` برای عبور از CDN):
+```bash
+whmcsproxy set-transport --transport wss --mux on --keepalive 15s --apply
+```
+(روی هر دو سرور یکسان تنظیم کنید.)
+
+## ۹) دامنه روی CDN — ArvanCloud و Cloudflare
+
+نکته‌ی مهم که حتماً رعایت کنید:
+
+> **پروکسی forward و تانل از داخل CDN عبور نمی‌کنند.** هیچ CDN‌ای (نه آروان‌کلود نه کلادفلر)
+> ترافیک CONNECT/SOCKS/تانلِ دلخواه را روی پورت دلخواه رله نمی‌کند. پس رکورد **A** ساب‌دامینِ
+> **پروکسی** و **تانل** باید **DNS-only / ابر خاموش (Cloud OFF / grey-cloud)** باشد و مستقیم به
+> آی‌پی سرور اشاره کند.
+
+اما **گواهی SSL** را حتی وقتی دامنه‌تان روی این CDNها میزبانی می‌شود می‌توانید با **DNS-01**
+بگیرید (به پورت ۸۰ هم نیاز ندارد). موقع نصب، cert-mode را انتخاب کنید:
+
+- دامنه روی **Cloudflare**:
+  ```bash
+  sudo ./setup.sh --role entry --domain proxy.yourdomain.com \
+    --cert-mode dns-cloudflare --cf-token <CLOUDFLARE_API_TOKEN> \
+    --exit-host tunnel.yourdomain.com --tunnel-user U --tunnel-pass P
+  ```
+  توکن با دسترسی `Zone:DNS:Edit`.
+
+- دامنه روی **ArvanCloud (arvancloud.ir)**:
+  ```bash
+  sudo ./setup.sh --role entry --domain proxy.yourdomain.ir \
+    --cert-mode dns-arvan --arvan-token <ARVANCLOUD_API_KEY> \
+    --exit-host tunnel.yourdomain.ir --tunnel-user U --tunnel-pass P
+  ```
+  کلید API را از پنل آروان‌کلود بردارید. اسکریپت خودکار رکورد `_acme-challenge` را از طریق
+  API آروان می‌سازد، گواهی را می‌گیرد و رکورد را پاک می‌کند. اگر zone به‌درستی تشخیص داده
+  نشد، با `ARVAN_ZONE=yourdomain.ir` آن را دستی بدهید. تمدید خودکار هم با همین هوک انجام می‌شود.
+
+خلاصه‌ی CDN: **گواهی از طریق DNS-01 ✅ ، ولی رکورد پروکسی/تانل حتماً DNS-only باشد ✅**.
+اگر تانل فیلتر شد، از `--transport wss` استفاده کنید تا شبیه ترافیک وب معمولی شود (بخش ۸).
 
 ---
 

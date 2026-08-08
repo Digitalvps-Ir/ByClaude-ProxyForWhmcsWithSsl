@@ -21,10 +21,13 @@ set -euo pipefail
 # ------------------------------------------------------------------ defaults
 ROLE=""
 DOMAIN=""
+DASHBOARD_DOMAIN=""             # optional separate subdomain for the dashboard
 EMAIL=""
 CERT_MODE="standalone"          # standalone | webroot | dns-cloudflare | existing
+APPLY_TUNING=1                  # BBR + socket buffer tuning
 WEBROOT="/var/www/html"
 CF_TOKEN=""                     # for dns-cloudflare (file path or literal token)
+ARVAN_TOKEN=""                  # for dns-arvan (ArvanCloud API key)
 CERT_FILE=""; KEY_FILE=""       # for --cert-mode existing
 
 HTTPS_PORT=443
@@ -46,6 +49,7 @@ NO_DASHBOARD=0
 
 INSTALL_DIR="/opt/whmcs-proxy"
 STATE_DIR="/etc/gost"
+LOG_DIR="/var/log/gost"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ------------------------------------------------------------------ helpers
@@ -64,10 +68,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --role) ROLE="$2"; shift 2;;
     --domain) DOMAIN="$2"; shift 2;;
+    --dashboard-domain) DASHBOARD_DOMAIN="$2"; shift 2;;
     --email) EMAIL="$2"; shift 2;;
     --cert-mode) CERT_MODE="$2"; shift 2;;
     --webroot) WEBROOT="$2"; shift 2;;
     --cf-token) CF_TOKEN="$2"; shift 2;;
+    --arvan-token) ARVAN_TOKEN="$2"; shift 2;;
     --cert-file) CERT_FILE="$2"; shift 2;;
     --key-file) KEY_FILE="$2"; shift 2;;
     --https-port) HTTPS_PORT="$2"; shift 2;;
@@ -88,6 +94,7 @@ while [ $# -gt 0 ]; do
     --gost-url) GOST_URL="$2"; shift 2;;
     --no-firewall) OPEN_FIREWALL=0; shift;;
     --no-dashboard) NO_DASHBOARD=1; shift;;
+    --no-tuning) APPLY_TUNING=0; shift;;
     -h|--help) usage;;
     *) die "unknown option: $1 (use --help)";;
   esac
@@ -145,62 +152,82 @@ install_gost(){
 install_gost
 
 # ------------------------------------------------------------------ 3. app files
-info "Installing control tool and dashboard to $INSTALL_DIR…"
-mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+info "Installing control tools and dashboard to $INSTALL_DIR…"
+mkdir -p "$INSTALL_DIR" "$STATE_DIR" "$LOG_DIR"
 for f in gostctl.py dashboard.py; do
   [ -f "$SRC_DIR/$f" ] || die "missing $SRC_DIR/$f (run setup.sh from inside the repo)"
   install -m 0755 "$SRC_DIR/$f" "$INSTALL_DIR/$f"
 done
-# convenience CLI
+[ -f "$SRC_DIR/lib/common.sh" ] || die "missing $SRC_DIR/lib/common.sh"
+install -m 0644 "$SRC_DIR/lib/common.sh" "$INSTALL_DIR/common.sh"
+[ -f "$SRC_DIR/lib/certbot-arvan-hook.sh" ] && install -m 0755 "$SRC_DIR/lib/certbot-arvan-hook.sh" "$INSTALL_DIR/certbot-arvan-hook.sh"
+[ -f "$SRC_DIR/uninstall.sh" ] && install -m 0755 "$SRC_DIR/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
+# interactive management console
+[ -f "$SRC_DIR/whmcsproxy" ] || die "missing $SRC_DIR/whmcsproxy"
+install -m 0755 "$SRC_DIR/whmcsproxy" /usr/local/bin/whmcsproxy
+# raw gostctl passthrough (kept for compatibility)
 cat > /usr/local/bin/whmcs-proxy <<EOF
 #!/usr/bin/env bash
 exec python3 $INSTALL_DIR/gostctl.py "\$@"
 EOF
 chmod 0755 /usr/local/bin/whmcs-proxy
-c_grn "✓ 'whmcs-proxy' CLI installed (try: whmcs-proxy status)"
+c_grn "✓ 'whmcsproxy' console installed (run: whmcsproxy)"
 
 # ------------------------------------------------------------------ 4. certificate
 obtain_cert(){
+  local d="${1:-$DOMAIN}"
   if [ "$CERT_MODE" = "existing" ]; then
     [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ] || die "--cert-file/--key-file not found"
     c_grn "✓ using existing certificate"
     return
   fi
-  local live="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+  local live="/etc/letsencrypt/live/$d/fullchain.pem"
   if [ -f "$live" ]; then
-    info "certificate for $DOMAIN already present; skipping issuance"
-  else
-    local ca_args="--non-interactive --agree-tos"
-    if [ -n "$EMAIL" ]; then ca_args="$ca_args -m $EMAIL"; else ca_args="$ca_args --register-unsafely-without-email"; fi
-    case "$CERT_MODE" in
-      standalone)
-        info "Requesting Let's Encrypt cert (standalone, needs port 80 free & DNS ready)…"
-        certbot certonly --standalone -d "$DOMAIN" $ca_args --preferred-challenges http \
-          || die "certbot failed. Ensure $DOMAIN points to THIS server and TCP/80 is open, or use --cert-mode dns-cloudflare."
-        ;;
-      webroot)
-        info "Requesting Let's Encrypt cert (webroot $WEBROOT)…"
-        mkdir -p "$WEBROOT"
-        certbot certonly --webroot -w "$WEBROOT" -d "$DOMAIN" $ca_args \
-          || die "certbot webroot failed."
-        ;;
-      dns-cloudflare)
-        local cffile="$CF_TOKEN"
-        if [ -n "$CF_TOKEN" ] && [ ! -f "$CF_TOKEN" ]; then
-          cffile="/etc/letsencrypt/cloudflare.ini"
-          printf 'dns_cloudflare_api_token = %s\n' "$CF_TOKEN" > "$cffile"; chmod 600 "$cffile"
-        fi
-        [ -f "$cffile" ] || die "dns-cloudflare needs --cf-token (API token or ini file path)"
-        info "Requesting Let's Encrypt cert (Cloudflare DNS-01)…"
-        certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$cffile" -d "$DOMAIN" $ca_args \
-          || die "certbot dns-cloudflare failed."
-        ;;
-      *) die "unknown --cert-mode: $CERT_MODE";;
-    esac
-    c_grn "✓ certificate issued for $DOMAIN"
+    info "certificate for $d already present; skipping issuance"
+    return
   fi
+  local ca_args="--non-interactive --agree-tos"
+  if [ -n "$EMAIL" ]; then ca_args="$ca_args -m $EMAIL"; else ca_args="$ca_args --register-unsafely-without-email"; fi
+  case "$CERT_MODE" in
+    standalone)
+      info "Requesting Let's Encrypt cert for $d (standalone, needs port 80 free & DNS ready)…"
+      certbot certonly --standalone -d "$d" $ca_args --preferred-challenges http \
+        || die "certbot failed. Ensure $d points to THIS server and TCP/80 is open, or use --cert-mode dns-cloudflare."
+      ;;
+    webroot)
+      info "Requesting Let's Encrypt cert for $d (webroot $WEBROOT)…"
+      mkdir -p "$WEBROOT"
+      certbot certonly --webroot -w "$WEBROOT" -d "$d" $ca_args \
+        || die "certbot webroot failed."
+      ;;
+    dns-cloudflare)
+      local cffile="$CF_TOKEN"
+      if [ -n "$CF_TOKEN" ] && [ ! -f "$CF_TOKEN" ]; then
+        cffile="/etc/letsencrypt/cloudflare.ini"
+        printf 'dns_cloudflare_api_token = %s\n' "$CF_TOKEN" > "$cffile"; chmod 600 "$cffile"
+      fi
+      [ -f "$cffile" ] || die "dns-cloudflare needs --cf-token (API token or ini file path)"
+      info "Requesting Let's Encrypt cert for $d (Cloudflare DNS-01)…"
+      certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$cffile" -d "$d" $ca_args \
+        || die "certbot dns-cloudflare failed."
+      ;;
+    dns-arvan)
+      [ -n "$ARVAN_TOKEN" ] || die "dns-arvan needs --arvan-token (ArvanCloud API key)"
+      local hook="$INSTALL_DIR/certbot-arvan-hook.sh"
+      [ -f "$hook" ] || die "ArvanCloud hook missing ($hook)"
+      info "Requesting Let's Encrypt cert for $d (ArvanCloud DNS-01; works behind the CDN)…"
+      ARVAN_API_KEY="$ARVAN_TOKEN" certbot certonly --manual --preferred-challenges dns \
+        --manual-auth-hook "$hook auth" --manual-cleanup-hook "$hook cleanup" \
+        -d "$d" $ca_args || die "certbot dns-arvan failed (check the API key and that $d's zone is on ArvanCloud)."
+      ;;
+    *) die "unknown --cert-mode: $CERT_MODE";;
+  esac
+  c_grn "✓ certificate issued for $d"
 }
-obtain_cert
+obtain_cert "$DOMAIN"
+if [ "$ROLE" = "entry" ] && [ -n "$DASHBOARD_DOMAIN" ] && [ "$DASHBOARD_DOMAIN" != "$DOMAIN" ]; then
+  obtain_cert "$DASHBOARD_DOMAIN"
+fi
 
 # ------------------------------------------------------------------ 5. state file
 info "Writing state…"
@@ -229,8 +256,23 @@ else
   [ -n "$PROXY_PASS" ] || PROXY_PASS="$(rand 20)"
   python3 "$INSTALL_DIR/gostctl.py" useradd "$PROXY_USER" --password "$PROXY_PASS" >/dev/null
 fi
+if [ "$ROLE" = "entry" ] && [ -n "$DASHBOARD_DOMAIN" ] && [ "$DASHBOARD_DOMAIN" != "$DOMAIN" ]; then
+  python3 "$INSTALL_DIR/gostctl.py" set-domain "$DASHBOARD_DOMAIN" --dashboard >/dev/null
+fi
 python3 "$INSTALL_DIR/gostctl.py" render >/dev/null
 c_grn "✓ configuration written to $STATE_DIR/config.json"
+
+# request-log rotation
+cat > /etc/logrotate.d/whmcs-proxy <<EOF
+$LOG_DIR/*.log {
+  daily
+  rotate 14
+  compress
+  missingok
+  notifempty
+  copytruncate
+}
+EOF
 
 # ------------------------------------------------------------------ 6. systemd
 info "Installing systemd services…"
@@ -263,6 +305,7 @@ Wants=network-online.target
 Type=simple
 Environment=GOST_STATE=$STATE_DIR/state.json
 Environment=GOST_CONFIG=$STATE_DIR/config.json
+Environment=WHMCSPROXY_BIN=/usr/local/bin/whmcsproxy
 ExecStart=/usr/bin/python3 $INSTALL_DIR/dashboard.py
 Restart=always
 RestartSec=3
@@ -278,6 +321,13 @@ if [ "$NO_DASHBOARD" = "0" ]; then
   systemctl enable --now whmcs-proxy-dashboard >/dev/null 2>&1 || systemctl restart whmcs-proxy-dashboard
 fi
 c_grn "✓ services started"
+
+# ------------------------------------------------------------------ 6b. performance tuning
+if [ "$APPLY_TUNING" = "1" ]; then
+  # shellcheck source=/dev/null
+  source "$INSTALL_DIR/common.sh"
+  wp_apply_tuning || c_yel "tuning step reported an issue (non-fatal)"
+fi
 
 # ------------------------------------------------------------------ 7. auto-renew hook
 info "Configuring automatic SSL renewal…"
@@ -333,9 +383,11 @@ CREDFILE="/root/whmcs-proxy-credentials.txt"
   fi
   echo
   [ "$NO_DASHBOARD" = "0" ] && {
-    echo "DASHBOARD: https://$DOMAIN:$DASH_PORT"
+    dash_host="${DASHBOARD_DOMAIN:-$DOMAIN}"
+    echo "DASHBOARD: https://$dash_host:$DASH_PORT"
     echo "  admin user: $ADMIN_USER"
     echo "  admin pass: $ADMIN_PASS"
+    echo "CONSOLE (SSH menu): run  whmcsproxy"
   }
 } | tee "$CREDFILE"
 chmod 600 "$CREDFILE"
@@ -343,6 +395,7 @@ chmod 600 "$CREDFILE"
 echo
 c_grn "════════════════════════════════════════════════════════════"
 c_grn " Done. Summary saved to $CREDFILE (chmod 600)."
+c_grn " Manage anytime from SSH:  whmcsproxy"
 c_grn "════════════════════════════════════════════════════════════"
 python3 "$INSTALL_DIR/gostctl.py" status || true
 if [ "$ROLE" = "exit" ]; then
@@ -352,4 +405,5 @@ else
   echo
   info "Verify from the Iran server:"
   echo "  curl -x https://$PROXY_USER:$PROXY_PASS@$DOMAIN:$HTTPS_PORT https://bsc-dataseed4.binance.org/ -I"
+  echo "  whmcsproxy benchmark   # tunnel latency / jitter / throughput"
 fi
