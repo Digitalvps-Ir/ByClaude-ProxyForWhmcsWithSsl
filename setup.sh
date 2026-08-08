@@ -208,15 +208,15 @@ obtain_cert(){
   if [ "$CERT_MODE" = "standalone" ] || [ "$CERT_MODE" = "webroot" ]; then
     local rip; rip="$(getent hosts "$d" 2>/dev/null | awk '{print $1; exit}' || true)"
     if [ -z "$rip" ]; then
-      c_red "DNS: «$d» resolve نمی‌شود (رکورد A ندارد / NXDOMAIN)."
-      c_red "یک رکورد A برای «$d» بسازید که به IP همین سرور اشاره کند (ابر/CDN خاموش)،"
-      c_red "یا چون دامنه‌تان روی ArvanCloud است از این استفاده کنید:  --cert-mode dns-arvan --arvan-token <API_KEY>"
+      c_red "DNS: '$d' does not resolve (no A record / NXDOMAIN)."
+      c_red "Create a DNS A record for '$d' pointing to THIS server's IP (CDN OFF),"
+      c_red "or, if your domain is on ArvanCloud, use:  --cert-mode dns-arvan --arvan-token <API_KEY>"
       die "DNS record for '$d' not found. Create an A record to THIS server (CDN off), or use --cert-mode dns-arvan/dns-cloudflare."
     fi
     local myips; myips=" $(hostname -I 2>/dev/null || true) $(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true) "
     case "$myips" in
       *" $rip "*) : ;;
-      *) c_yel "warning / هشدار: «$d» به $rip اشاره می‌کند که شاید IP همین سرور نباشد — اگر standalone شکست خورد، رکورد A را اصلاح کنید یا از dns-arvan استفاده کنید." ;;
+      *) c_yel "  warning: '$d' resolves to $rip, which may not be THIS server. If standalone fails, fix the A record or use --cert-mode dns-arvan." ;;
     esac
   fi
   local ca_args="--non-interactive --agree-tos"
