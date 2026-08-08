@@ -130,7 +130,7 @@ if [ $# -gt 0 ]; then
   exec ./setup.sh "$@"
 fi
 
-ask(){ local p="$1" d="${2:-}" v; read -rp "$p${d:+ [$d]}: " v; echo "${v:-$d}"; }
+ask(){ local p="$1" d="${2:-}" v=""; read -rp "$p${d:+ [$d]}: " v || true; echo "${v:-$d}"; }
 gen(){ local n="${1:-24}" s; s="$(head -c "$((n*10+32))" /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"; printf '%s' "${s:0:n}"; }
 
 # no terminal (piped) and no flags: print the manual commands and exit
